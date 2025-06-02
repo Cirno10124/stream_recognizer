@@ -1,0 +1,176 @@
+﻿#ifndef AUDIO_PROCESSOR_H
+#define AUDIO_PROCESSOR_H
+
+#include <QObject>
+#include <QMediaPlayer>
+#include <QAudioOutput>
+#include <QVideoWidget>
+#include <whisper.h>
+#include <string>
+#include <memory>
+#include <thread>
+#include <atomic>
+#include <ctime>
+#include <unordered_set>
+
+class WhisperGUI;
+class SubtitleManager;
+
+// Forward declarations
+class AudioQueue;
+class ResultQueue;
+class AudioCapture;
+class FileAudioInput;
+class FastRecognizer;
+class PreciseRecognizer;
+class Translator;
+class AudioSegment;
+class RealtimeSegmentHandler;
+
+class AudioProcessor : public QObject {
+    Q_OBJECT
+    
+public:
+    enum class InputMode {
+        MICROPHONE,
+        AUDIO_FILE,
+        VIDEO_FILE
+    };
+    
+    AudioProcessor(WhisperGUI* gui, QObject* parent = nullptr);
+    ~AudioProcessor();
+    
+    // Input methods
+    void setInputFile(const std::string& file_path);
+    void setInputMode(InputMode mode);
+    
+    // Processing control
+    void startProcessing();
+    void stopProcessing();
+    void pauseProcessing();
+    void resumeProcessing();
+    
+    // Media playback control
+    bool isPlaying() const;
+    void play();
+    void pause();
+    void stop();
+    void setPosition(qint64 position);
+    void seekToPosition(qint64 position);
+    qint64 getMediaDuration() const;
+    qint64 getMediaPosition() const;
+    bool isMediaPlaying() const;
+    
+    // Configuration
+    void setSourceLanguage(const std::string& lang);
+    void setTargetLanguage(const std::string& lang);
+    void setDualLanguage(bool enable);
+    void setUseGPU(bool enable);
+    void setVADThreshold(float threshold);
+    void setFastMode(bool enable);
+    
+    // OpenAI API integration
+    bool processWithOpenAI(const std::string& audio_file_path);
+    void setUseOpenAI(bool enable) { use_openai = enable; }
+    bool isUsingOpenAI() const { return use_openai; }
+    
+    // Realtime segmentation
+    void setRealtimeMode(bool enable) { use_realtime_segments = enable; }
+    void setSegmentSize(size_t size_ms) { segment_size_ms = size_ms; }
+    void setSegmentOverlap(size_t overlap_ms) { segment_overlap_ms = overlap_ms; }
+    
+    // Helpers
+    QVideoWidget* getVideoWidget();
+    bool isPaused() const { return is_paused; }
+    bool isProcessing() const { return is_processing; }
+    bool hasInputFile() const { return !current_file_path.empty(); }
+    InputMode getCurrentInputMode() const { return current_input_mode; }
+    
+    // Model preloading
+    bool preloadModels(std::function<void(const std::string&)> progress_callback = nullptr);
+    
+private:
+    // Processing methods
+    void processAudio();
+    void startMediaPlayback(const QString& file_path);
+    void stopMediaPlayback();
+    void pauseMediaPlayback();
+    void resumeMediaPlayback();
+    void seekMediaPosition(qint64 position);
+    std::string getTempAudioPath() const;
+    bool extractAudioFromVideo(const std::string& video_path, const std::string& audio_path);
+    qint64 convertTimestampToMs(const std::chrono::system_clock::time_point& timestamp);
+    
+    // 添加文本相似度检测方法
+    bool isTextSimilar(const std::string& text1, const std::string& text2, float threshold = 0.7);
+    bool isResultDuplicate(const QString& result);
+    
+    // Segment handling
+    void onSegmentReady(const AudioSegment& segment);
+    
+    // GUI reference
+    WhisperGUI* gui;
+    
+    // State
+    InputMode current_input_mode;
+    std::string current_file_path;
+    std::string temp_wav_path;
+    std::string current_language;
+    std::string target_language;
+    bool dual_language;
+    bool use_gpu;
+    float vad_threshold;
+    bool fast_mode;
+    bool use_openai;
+    bool use_realtime_segments = false;
+    size_t segment_size_ms = 5000;  // 默认5秒
+    size_t segment_overlap_ms = 500; // 默认0.5秒
+    
+    std::atomic<bool> is_processing;
+    std::atomic<bool> is_paused;
+    
+    // Processing resources
+    std::unique_ptr<AudioQueue> audio_queue;
+    std::unique_ptr<ResultQueue> fast_results;
+    std::unique_ptr<ResultQueue> precise_results;
+    std::unique_ptr<ResultQueue> final_results;
+    
+    std::unique_ptr<AudioCapture> audio_capture;
+    std::unique_ptr<FileAudioInput> file_input;
+    std::unique_ptr<FastRecognizer> fast_recognizer;
+    std::unique_ptr<PreciseRecognizer> precise_recognizer;
+    std::unique_ptr<Translator> translator;
+    std::unique_ptr<RealtimeSegmentHandler> segment_handler;
+    
+    // 添加用于检测重复文本的集合
+    std::unordered_set<std::string> processed_texts;
+    
+    // Preloaded models
+    std::unique_ptr<FastRecognizer> preloaded_fast_recognizer;
+    std::unique_ptr<PreciseRecognizer> preloaded_precise_recognizer;
+    std::unique_ptr<Translator> preloaded_translator;
+    
+    // Processing thread
+    std::thread process_thread;
+    
+    // Media playback
+    QMediaPlayer* media_player;
+    QAudioOutput* audio_output;
+    QVideoWidget* video_widget;
+    
+    // Subtitle management
+    std::unique_ptr<SubtitleManager> subtitle_manager;
+    
+signals:
+    void playbackStateChanged(QMediaPlayer::PlaybackState state);
+    void durationChanged(qint64 duration);
+    void positionChanged(qint64 position);
+    void errorOccurred(const QString& error);
+    void recognitionResultReady(const QString& text);
+    void translationResultReady(const QString& text);
+    void subtitlePreviewReady(const QString& text, qint64 start_time, qint64 duration);
+    void openAIResultReady(const QString& text);
+    void temporaryFileCreated(const QString& filePath);
+};
+
+#endif // AUDIO_PROCESSOR_H 

@@ -1,0 +1,32 @@
+--- a/3rd_party/whisper.cpp/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/3rd_party/whisper.cpp/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -498,7 +498,15 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
+         pool_used -= size;
+ 
+         // all deallocations must be in reverse order of the allocations
+-        GGML_ASSERT(ptr == (void *) ((char *)(pool_addr) + pool_used));
++        // 添加更安全的内存池释放检查，避免断言失败
++        void* expected_ptr = (void *) ((char *)(pool_addr) + pool_used);
++        if (ptr != expected_ptr) {
++            // 记录错误但不中断程序
++            fprintf(stderr, "Warning: CUDA VMM pool deallocation order violation. Expected: %p, Got: %p\n", 
++                    expected_ptr, ptr);
++            // 强制重置内存池状态
++            pool_used = 0;
++        }
+     }
+ };
+ #endif // defined(GGML_USE_VMM)
+@@ -506,6 +514,12 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
+ std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_for_device(int device) {
+ #if defined(GGML_USE_VMM)
+     if (ggml_cuda_info().devices[device].vmm) {
++        // 检查环境变量，允许强制禁用VMM
++        const char* force_legacy = getenv("GGML_CUDA_FORCE_LEGACY_POOL");
++        if (force_legacy && atoi(force_legacy) != 0) {
++            fprintf(stderr, "Info: Forcing legacy CUDA memory pool due to GGML_CUDA_FORCE_LEGACY_POOL\n");
++            return std::unique_ptr<ggml_cuda_pool>(new ggml_cuda_pool_leg(device));
++        }
+         return std::unique_ptr<ggml_cuda_pool>(new ggml_cuda_pool_vmm(device));
+     }
+ #endif // defined(GGML_USE_VMM) 

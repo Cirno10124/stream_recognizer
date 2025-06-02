@@ -1,0 +1,4 @@
+C:/Users/89774/source/repos/stream_recognizer/libfvad-1.0/build/CMakeFiles/fvad.dir
+C:/Users/89774/source/repos/stream_recognizer/libfvad-1.0/build/CMakeFiles/INSTALL.dir
+C:/Users/89774/source/repos/stream_recognizer/libfvad-1.0/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/89774/source/repos/stream_recognizer/libfvad-1.0/build/CMakeFiles/ZERO_CHECK.dir

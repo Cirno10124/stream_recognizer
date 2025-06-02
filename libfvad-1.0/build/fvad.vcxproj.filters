@@ -1,0 +1,49 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\fvad.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\signal_processing\division_operations.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\signal_processing\energy.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\signal_processing\get_scaling_square.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\signal_processing\resample_48khz.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\signal_processing\resample_by_2_internal.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\signal_processing\resample_fractional.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\signal_processing\spl_inl.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\vad\vad_core.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\vad\vad_filterbank.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\vad\vad_gmm.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\src\vad\vad_sp.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{5DAE083B-CE45-3BAE-BB65-67E9D6C20E88}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

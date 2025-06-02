@@ -1,0 +1,24 @@
+{
+    "audio": {
+        "channels": 1,
+        "frames_per_buffer": 1024,
+        "keep_ms": 8000,
+        "max_buffers": 1000,
+        "sample_rate": 16000,
+        "step_ms": 3000
+    },
+    "models": {
+        "fast_model": "models/ggml-base.bin",
+        "precise_model": "models/ggml-large-v3-turbo.bin",
+        "translate_model": "models/ggml-base.bin"
+    },
+    "recognition": {
+        "dual_language": true,
+        "fast_mode": false,
+        "input_file": "C:/FFOutput/world.execute(me);.wav",
+        "language": "en",
+        "precise_server_url": "http://192.168.0.19:8080",
+        "target_language": "en",
+        "vad_threshold": 0.15
+    }
+}

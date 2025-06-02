@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{15adeb16-3f0d-40d6-bbf8-f03e7d08a694}</ProjectGuid>
+    <RootNamespace>streamrecognizer</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ReferencePath>$(ReferencePath)</ReferencePath>
+    <ExternalIncludePath>C:\Users\89774\source\repos\whisper.cpp\ggml\include;C:\Users\89774\source\repos\stream_recognizer\include;C:\Users\89774\portaudio\include;C:\Users\89774\vcpkg\installed\x64-windows\include;C:\Qt\6.8.3\msvc2022_64\include\QtWidgets;C:\Qt\6.8.3\msvc2022_64\include\QtCore;$(ExternalIncludePath)</ExternalIncludePath>
+    <LibraryPath>C:\Users\89774\vcpkg\installed\x64-windows\lib;C:\Users\89774\source\repos\stream_recognizer\lib;C:\Users\89774\portaudio\build\Release;C:\Qt\6.8.3\msvc2022_64\lib;$(LibraryPath)</LibraryPath>
+    <IncludePath>C:\Qt\6.8.3\msvc2022_64\include\QtCore;C:\Qt\6.8.3\msvc2022_64\include\QtWidgets;C:\Qt\6.8.3\msvc2022_64\include;C:\Qt\6.8.3\msvc2022_64\include\QtGui;C:\Qt\6.8.3\msvc2022_64\include\QtMultimedia;C:\Qt\6.8.3\msvc2022_64\include\QtMultimediaWidgets</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IncludePath>C:\Qt\6.8.3\msvc2022_64\include\QtCore;C:\Qt\6.8.3\msvc2022_64\include\QtWidgets;C:\Qt\6.8.3\msvc2022_64\include;C:\Qt\6.8.3\msvc2022_64\include\QtGui;C:\Qt\6.8.3\msvc2022_64\include\QtMultimedia;C:\Qt\6.8.3\msvc2022_64\include\QtMultimediaWidgets;C:\Qt\6.8.3\msvc2022_64\include\QtNetwork</IncludePath>
+    <ExternalIncludePath>C:\Users\89774\source\repos\stream_recognizer\libfvad-1.0\include;C:\Users\89774\source\repos\whisper.cpp\ggml\include;C:\Users\89774\source\repos\stream_recognizer\include;C:\Users\89774\portaudio\include;C:\Users\89774\vcpkg\installed\x64-windows\include;C:\Qt\6.8.3\msvc2022_64\include\QtWidgets;C:\Qt\6.8.3\msvc2022_64\include\QtCore;$(ExternalIncludePath)</ExternalIncludePath>
+    <LibraryPath>C:\Users\89774\vcpkg\installed\x64-windows\lib;C:\Users\89774\source\repos\stream_recognizer\lib;C:\Users\89774\portaudio\build\Release;C:\Qt\6.8.3\msvc2022_64\lib;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <EnableModules>false</EnableModules>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>C:\Users\89774\portaudio\build\Release\portaudio_x64.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml.lib;C:\Users\89774\source\repos\stream_recognizer\lib\whisper.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-cpu.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-base.lib;C:\Program Files\Mega-Nerd\libsndfile\lib\libsndfile-1.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Cored.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Widgetsd.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Gui.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Multimediad.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6MultimediaWidgetsd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>Disabled</Optimization>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>C:\Users\89774\portaudio\build\Release\portaudio_x64.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml.lib;C:\Users\89774\source\repos\stream_recognizer\lib\whisper.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-cpu.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-base.lib;C:\Program Files\Mega-Nerd\libsndfile\lib\libsndfile-1.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Core.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Widgets.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Gui.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Multimedia.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6MultimediaWidgets.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Network.lib;C:\Users\89774\source\repos\stream_recognizer\lib\fvad.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\whisper.cpp\ggml\src\ggml.c" />
+    <ClCompile Include="src\audio_capture.cpp" />
+    <ClCompile Include="src\audio_handlers.cpp" />
+    <ClCompile Include="src\audio_preprocessor.cpp" />
+    <ClCompile Include="src\audio_processor.cpp" />
+    <ClCompile Include="src\audio_queue.cpp" />
+    <ClCompile Include="src\config_manager.cpp" />
+    <ClCompile Include="src\loading_dialog.cpp" />
+    <ClCompile Include="src\log_utils.cpp" />
+    <ClCompile Include="src\moc_audio_capture.cpp" />
+    <ClCompile Include="src\moc_audio_processor.cpp" />
+    <ClCompile Include="src\moc_loading_dialog.cpp" />
+    <ClCompile Include="src\moc_log_utils.cpp" />
+    <ClCompile Include="src\moc_parallel_openai_processor.cpp" />
+    <ClCompile Include="src\moc_realtime_segment_handler.cpp" />
+    <ClCompile Include="src\moc_result_merger.cpp" />
+    <ClCompile Include="src\moc_subtitle_manager.cpp" />
+    <ClCompile Include="src\moc_voice_activity_detector.cpp" />
+    <ClCompile Include="src\moc_whisper_gui.cpp" />
+    <ClCompile Include="src\parallel_openai_processor.cpp" />
+    <ClCompile Include="src\realtime_segment_handler.cpp" />
+    <ClCompile Include="src\recognizer.cpp" />
+    <ClCompile Include="src\result_merger.cpp" />
+    <ClCompile Include="src\result_queue.cpp" />
+    <ClCompile Include="src\stream_recognizer.cpp" />
+    <ClCompile Include="src\subtitle_manager.cpp" />
+    <ClCompile Include="src\translator.cpp" />
+    <ClCompile Include="src\voice_activity_detector.cpp" />
+    <ClCompile Include="src\whisper_gui.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\audio_capture.h" />
+    <ClInclude Include="include\audio_handlers.h" />
+    <ClInclude Include="include\audio_preprocessor.h" />
+    <ClInclude Include="include\audio_processor.h" />
+    <ClInclude Include="include\audio_queue.h" />
+    <ClInclude Include="include\audio_types.h" />
+    <ClInclude Include="include\audio_utils.h" />
+    <ClInclude Include="include\config_manager.h" />
+    <ClInclude Include="include\ggml.h" />
+    <ClInclude Include="include\loading_dialog.h" />
+    <ClInclude Include="include\log_utils.h" />
+    <ClInclude Include="include\parallel_openai_processor.h" />
+    <ClInclude Include="include\realtime_segment_handler.h" />
+    <ClInclude Include="include\result_merger.h" />
+    <ClInclude Include="include\subtitle_manager.h" />
+    <ClInclude Include="include\voice_activity_detector.h" />
+    <ClInclude Include="include\whisper.h" />
+    <ClInclude Include="include\whisper_gui.h" />
+    <ClInclude Include="libfvad-1.0\include\fvad.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="include\audio_processor.h.bak" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>
