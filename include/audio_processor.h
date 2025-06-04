@@ -301,6 +301,9 @@ private:
     // 根据识别模式处理音频数据
     void processAudioDataByMode(const std::vector<float>& audio_data);
     
+    // 启动最后段延迟处理，确保最后一个音频段的识别结果有足够时间返回
+    void startFinalSegmentDelayProcessing();
+    
     // GUI指针
     WhisperGUI* gui;
     
@@ -330,7 +333,7 @@ private:
     size_t min_speech_segment_samples{0};  // 最小语音段长度(样本数)
     size_t max_silence_ms{500};  // 最大静音长度(毫秒)
     size_t silence_frames_count{0};  // 静音帧计数
-    std::unique_ptr<VoiceActivityDetector> vad;  // VAD检测器
+    std::unique_ptr<VoiceActivityDetector> voice_detector;  // VAD检测器
     
     // OpenAI API设置
     bool use_openai{false}; // 默认关闭OpenAI API
@@ -375,8 +378,6 @@ private:
     // 添加新的成员变量
     std::unique_ptr<ParallelOpenAIProcessor> openai_processor;
     bool is_initialized{false};
-    
-    std::unique_ptr<VoiceActivityDetector> voice_detector;  // VAD检测器
     
     // 线程状态变量
     std::atomic<bool> fast_thread_running{false};

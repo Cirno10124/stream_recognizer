@@ -181,10 +181,6 @@ void RealtimeSegmentHandler::addBuffer(const AudioBuffer& buffer) {
 
 // 新增方法：直接处理缓冲区
 void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
-    // 添加到当前缓冲区
-    current_buffers.push_back(buffer);
-    total_samples += buffer.data.size();
-    
     // 检查是否需要生成段
     bool should_create_segment = false;
     
@@ -192,17 +188,36 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         // 最后一个缓冲区，强制生成段
         should_create_segment = true;
         LOG_INFO("收到最后缓冲区，生成最终段");
-    } else if (buffer.voice_end) {
-        // 检测到语音结束，生成段
-        should_create_segment = true;
-        LOG_INFO("检测到语音结束，生成段");
-    } else if (total_samples >= segment_size_samples) {
-        // 达到段大小限制，生成段
-        should_create_segment = true;
-        LOG_INFO("达到段大小限制，生成段: " + std::to_string(total_samples) + " 样本");
+        
+        // 即使当前缓冲区是空的，也要添加到current_buffers以确保处理
+        // 但只有在数据不为空时才添加样本数
+        if (!buffer.data.empty()) {
+            current_buffers.push_back(buffer);
+            total_samples += buffer.data.size();
+        } else {
+            LOG_INFO("最后缓冲区为空，但仍会强制处理之前积累的音频数据");
+        }
+    } else {
+        // 非最后缓冲区，正常添加到当前缓冲区
+        current_buffers.push_back(buffer);
+        total_samples += buffer.data.size();
+        
+        if (buffer.voice_end) {
+            // 检测到语音结束，生成段
+            should_create_segment = true;
+            LOG_INFO("检测到语音结束，生成段");
+        } else if (total_samples >= segment_size_samples) {
+            // 达到段大小限制，生成段
+            should_create_segment = true;
+            LOG_INFO("达到段大小限制，生成段: " + std::to_string(total_samples) + " 样本");
+        }
     }
     
     if (should_create_segment && !current_buffers.empty()) {
+        // 对于最后一个段，即使没有新的音频数据，也要处理之前积累的数据
+        LOG_INFO("准备生成音频段，当前缓冲区数量: " + std::to_string(current_buffers.size()) + 
+                ", 总样本数: " + std::to_string(total_samples));
+        
         // 生成音频段
         std::string segment_path = createSegment(current_buffers);
         
@@ -212,14 +227,33 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
             segment.timestamp = std::chrono::system_clock::now();
             segment.is_last = buffer.is_last;
             
+            LOG_INFO("音频段已创建: " + segment_path + 
+                    ", 是否为最后段: " + (segment.is_last ? "是" : "否"));
+            
             // 直接调用回调
             segment_ready_callback(segment);
-    }
-    
+        } else {
+            LOG_ERROR("音频段创建失败或回调未设置");
+        }
+        
         // 清理当前缓冲区
         current_buffers.clear();
         total_samples = 0;
         segment_count++;
+    } else if (buffer.is_last && current_buffers.empty()) {
+        // 特殊情况：最后缓冲区但没有积累的数据
+        LOG_INFO("收到最后缓冲区但没有积累的音频数据，仍会触发最后段处理回调");
+        
+        // 创建一个空的段来标识处理结束
+        if (segment_ready_callback) {
+            AudioSegment segment;
+            segment.filepath = "";  // 空路径表示没有实际音频文件
+            segment.timestamp = std::chrono::system_clock::now();
+            segment.is_last = true;
+            
+            LOG_INFO("发送最后段标记（无音频数据）");
+            segment_ready_callback(segment);
+        }
     }
 }
 

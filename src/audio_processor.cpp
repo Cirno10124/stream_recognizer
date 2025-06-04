@@ -266,7 +266,6 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
         
         // 清理已分配的资源
         try {
-            if (vad) vad.reset();
             if (voice_detector) voice_detector.reset();
             if (audio_preprocessor) audio_preprocessor.reset();
             if (audio_queue) audio_queue.reset();
@@ -427,7 +426,6 @@ AudioProcessor::~AudioProcessor() {
             if (audio_capture) audio_capture.reset();
             if (file_input) file_input.reset();
             if (voice_detector) voice_detector.reset();
-            if (vad) vad.reset();
             if (audio_preprocessor) audio_preprocessor.reset();
             if (segment_handler) segment_handler.reset();
             LOG_INFO("Audio processing resources cleaned up");
@@ -1578,13 +1576,6 @@ void AudioProcessor::setVADThreshold(float threshold) {
         voice_detector->setThreshold(threshold);
     }
     
-    // 同样更新vad对象
-    if (!vad) {
-        vad = std::make_unique<VoiceActivityDetector>(threshold);
-    } else {
-        vad->setThreshold(threshold);
-    }
-    
     // 更新识别器的VAD阈值 - 如果有setVADThreshold方法则可以直接调用
     if (fast_recognizer) {
         // 如果FastRecognizer支持updateVADThreshold方法
@@ -1773,53 +1764,76 @@ bool AudioProcessor::processWithOpenAI(const std::string& audio_file_path) {
 
 // 实时分段处理回调
 void AudioProcessor::onSegmentReady(const AudioSegment& segment) {
-    if (!is_processing) {
-        std::cout << "[WARNING] 收到分段，但处理已停止，忽略" << std::endl;
+    LOG_INFO("接收到音频段: " + segment.filepath + 
+            " (序列号: " + std::to_string(segment.sequence_number) + 
+            ", 时长: " + std::to_string(segment.duration_ms) + "ms" +
+            ", 是否最后段: " + (segment.is_last ? "是" : "否") + ")");
+    
+    // 检查是否为空的最后段标记
+    if (segment.is_last && segment.filepath.empty()) {
+        LOG_INFO("收到空的最后段标记，启动延迟处理以等待之前音频段的识别结果");
+        startFinalSegmentDelayProcessing();
         return;
     }
     
-    // 将音频数据从wav文件加载到内存中
-    std::vector<float> segment_data;
-    WavFileUtils::loadWavFile(segment.filepath, segment_data);
+    // 检查文件是否存在
+    if (!segment.filepath.empty() && !std::filesystem::exists(segment.filepath)) {
+        LOG_ERROR("音频段文件不存在: " + segment.filepath);
+        return;
+    }
     
-    // 获取当前音频段的时长
-    size_t segment_samples = segment_data.size();
-    float segment_duration_ms = segment_samples * 1000.0f / sample_rate;
+    // 获取音频数据用于进一步处理
+    std::vector<float> audio_data;
     
-    std::cout << "[INFO] 收到基于VAD的音频段: " << segment_duration_ms << "ms (" << 
-            segment_samples << " 样本)" << std::endl;
-    
-    // 如果音频段太短，则添加到待处理队列
-    if (segment_samples < min_processing_samples && !segment.is_last) {
-        // 添加到待处理队列
-        pending_audio_data.insert(pending_audio_data.end(), segment_data.begin(), segment_data.end());
-        pending_audio_samples += segment_samples;
-        
-        std::cout << "[INFO] 音频段太短，添加到待处理队列，当前队列: " << 
-                pending_audio_samples << " 样本 (" << 
-                pending_audio_samples * 1000.0f / sample_rate << "ms)" << std::endl;
-        
-        // 如果积累的数据足够长，则处理
-        if (pending_audio_samples >= min_processing_samples) {
-            std::cout << "[INFO] 待处理队列达到最小处理长度，开始处理" << std::endl;
-            processAudioDataByMode(pending_audio_data);
-            
-            // 清空待处理队列
-            pending_audio_data.clear();
-            pending_audio_samples = 0;
+    // 如果文件路径不为空，加载音频数据
+    if (!segment.filepath.empty()) {
+        if (!WavFileUtils::loadWavFile(segment.filepath, audio_data)) {
+            LOG_ERROR("无法加载音频段文件: " + segment.filepath);
+            return;
         }
-        
-        
+    }
+    
+    LOG_INFO("音频段加载成功，样本数: " + std::to_string(audio_data.size()));
+    
+    // 处理空音频数据的情况
+    if (audio_data.empty()) {
+        // 如果是最后一段且音频数据为空，说明可能是因为处理的音频段太短
+        if (segment.is_last) {
+            LOG_INFO("最后一段音频数据为空，启动延迟处理");
+            startFinalSegmentDelayProcessing();
+        } else {
+            LOG_WARNING("音频段数据为空，跳过处理: " + segment.filepath);
+        }
         return;
     }
+    
+    // 检查音频质量
+    size_t min_samples = 1600;  // 最小100ms的音频（16000Hz * 0.1s）
+    if (audio_data.size() < min_samples) {
+        LOG_INFO("音频段太短 (" + std::to_string(audio_data.size()) + " 样本，" + 
+                std::to_string(audio_data.size() * 1000.0f / 16000) + "ms)，跳过处理");
+        
+        // 如果是最后一段，即使太短也要启动延迟处理
+        if (segment.is_last) {
+            LOG_INFO("虽然最后段音频太短，但仍启动延迟处理以等待之前段的结果");
+            startFinalSegmentDelayProcessing();
+        }
+        return;
+    }
+    
+    // 进入待处理队列管理逻辑
+    pending_audio_data.insert(pending_audio_data.end(), audio_data.begin(), audio_data.end());
+    pending_audio_samples += audio_data.size();
+    
+    // 处理逻辑：检查是否需要与待处理数据合并
+    bool should_process_immediately = false;
+    
+    // 计算当前段的时长（毫秒）
+    float segment_duration_ms = audio_data.size() * 1000.0f / sample_rate;
     
     // 如果是最后一段音频，且有待处理数据，合并处理
     if (segment.is_last && pending_audio_samples > 0) {
         std::cout << "[INFO] 收到最后一段音频，与待处理队列合并处理" << std::endl;
-        
-        // 合并待处理数据和当前段
-        pending_audio_data.insert(pending_audio_data.end(), segment_data.begin(), segment_data.end());
-        pending_audio_samples += segment_samples;
         
         // 处理合并后的数据
         if (pending_audio_samples >= min_processing_samples / 2) {  // 对结束段放宽要求
@@ -1835,17 +1849,29 @@ void AudioProcessor::onSegmentReady(const AudioSegment& segment) {
         pending_audio_data.clear();
         pending_audio_samples = 0;
         
+        // 启动延迟处理，确保最后一个段的识别结果有足够时间返回
+        std::cout << "[INFO] 最后段处理完成，启动延迟处理，等待识别结果返回" << std::endl;
+        startFinalSegmentDelayProcessing();
         return;
     }
     
-    // 如果音频段足够长，或者是最后一段，直接处理
-    if (segment_samples >= min_processing_samples || segment.is_last) {
-        // 先处理当前段
-        std::cout << "[INFO] 音频段足够长，直接调用processAudioDataByMode处理" << std::endl;
-        processAudioDataByMode(segment_data);
+    // 检查是否达到处理阈值或时间限制
+    if (pending_audio_samples >= min_processing_samples) {
+        should_process_immediately = true;
+        LOG_INFO("达到最小处理样本数阈值: " + std::to_string(pending_audio_samples) + " >= " + 
+                std::to_string(min_processing_samples));
+    }
+    
+    if (should_process_immediately) {
+        LOG_INFO("处理合并音频段，调用processAudioDataByMode，样本数: " + std::to_string(pending_audio_samples));
+        processAudioDataByMode(pending_audio_data);
+        
+        // 重置待处理队列
+        pending_audio_data.clear();
+        pending_audio_samples = 0;
     } else {
-        std::cout << "[INFO] 音频段太短 (" << segment_duration_ms << 
-                "ms)，忽略" << std::endl;
+        LOG_INFO("音频段加入待处理队列，当前总样本数: " + std::to_string(pending_audio_samples) + 
+                " (需要达到 " + std::to_string(min_processing_samples) + " 才开始处理)");
     }
 }
 
@@ -2075,8 +2101,8 @@ void AudioProcessor::setSegmentOverlap(size_t ms) {
 
 bool AudioProcessor::detectVoiceActivity(const std::vector<float>& audio_buffer, int sample_rate) {
     // VAD现在已优化为处理20ms (320样本@16kHz) 的帧
-    if (vad) {
-        return vad->detect(audio_buffer, sample_rate);
+    if (voice_detector) {
+        return voice_detector->detect(audio_buffer, sample_rate);
     }
     return true;  // 如果没有VAD，默认认为有语音
 }
@@ -2699,16 +2725,16 @@ void AudioProcessor::initializeParameters() {
     base_energy_level = 0.0f;
     adaptive_threshold = 0.01f;  // 初始阈值，比之前的0.1f低很多
     
-    // 更新VAD设置 - 使用更合理的初始设置，避免重复创建
+    // 更新VAD设置 - 使用更合理的初始设置
     if (voice_detector) {
         voice_detector->setVADMode(2);  // 改为模式2（质量模式），平衡敏感度和准确性
         voice_detector->setThreshold(adaptive_threshold);  // 使用自适应阈值
     }
     
-    // 同样确保vad已正确初始化，避免重复创建
-    if (vad) {
-        vad->setThreshold(adaptive_threshold);
-        vad->setVADMode(2);  // 使用质量模式
+    // 同样确保voice_detector已正确初始化，避免重复创建
+    if (voice_detector) {
+        voice_detector->setThreshold(adaptive_threshold);
+        voice_detector->setVADMode(2);  // 使用质量模式
     }
     
     // 设置音频预处理参数 - 重新启用预处理但使用更保守的设置
@@ -2767,7 +2793,7 @@ std::vector<float> AudioProcessor::preprocessAudioBuffer(const std::vector<float
     }
     
     // 确保VAD检测器已正确初始化
-    if (!voice_detector || !vad) {
+    if (!voice_detector) {
         LOG_INFO("VAD detector not initialized, skipping adaptive VAD threshold update");
         return audio_buffer;  // 返回原始缓冲区，避免访问空指针
     }
@@ -2778,8 +2804,8 @@ std::vector<float> AudioProcessor::preprocessAudioBuffer(const std::vector<float
         updateAdaptiveVADThreshold(audio_buffer);
         
         // 创建音频缓冲区副本进行处理
-    std::vector<float> processed_buffer = audio_buffer;
-    
+        std::vector<float> processed_buffer = audio_buffer;
+        
         // 恢复预加重处理
         if (use_pre_emphasis && audio_preprocessor) {
             float gentle_coef = std::min(pre_emphasis_coef, 0.95f);  // 限制预加重系数
@@ -4438,8 +4464,8 @@ void AudioProcessor::updateAdaptiveVADThreshold(const std::vector<float>& audio_
                 if (voice_detector) {
                     voice_detector->setThreshold(adaptive_threshold);
                 }
-                if (vad) {
-                    vad->setThreshold(adaptive_threshold);
+                if (voice_detector) {
+                    voice_detector->setThreshold(adaptive_threshold);
                 }
                 
                 LOG_INFO("Adaptive VAD threshold calculation completed:");
@@ -4493,8 +4519,8 @@ void AudioProcessor::resetAdaptiveVAD() {
     if (voice_detector) {
         voice_detector->setThreshold(adaptive_threshold);
     }
-    if (vad) {
-        vad->setThreshold(adaptive_threshold);
+    if (voice_detector) {
+        voice_detector->setThreshold(adaptive_threshold);
     }
     
     LOG_INFO("Adaptive VAD reset, will re-collect base energy data");
@@ -5041,6 +5067,8 @@ bool AudioProcessor::initializeVADSafely() {
             voice_detector->setVADMode(3);  // 使用最敏感模式
             voice_detector->setThreshold(vad_threshold);
             
+            LOG_INFO("VAD实例配置成功 - VAD实例已就绪");
+            
             LOG_INFO("VAD参数配置完成");
             
         } catch (const std::exception& e) {
@@ -5067,6 +5095,100 @@ bool AudioProcessor::initializeVADSafely() {
 // 检查VAD是否已初始化
 bool AudioProcessor::isVADInitialized() const {
     return voice_detector && voice_detector->isVADInitialized();
+}
+
+// 启动最后段延迟处理，确保最后一个音频段的识别结果有足够时间返回
+void AudioProcessor::startFinalSegmentDelayProcessing() {
+    LOG_INFO("开始最后段延迟处理，等待识别结果返回");
+    
+    // 在单独的线程中执行延迟等待，避免阻塞主线程
+    std::thread delay_thread([this]() {
+        try {
+            auto start_time = std::chrono::steady_clock::now();
+            const int total_delay_seconds = 8;  // 总延迟8秒
+            const int check_interval_ms = 100;  // 每100毫秒检查一次
+            int logged_seconds = 0;
+            
+            LOG_INFO("最后段延迟处理：开始等待最多" + std::to_string(total_delay_seconds) + "秒");
+            
+            for (int elapsed_ms = 0; elapsed_ms < total_delay_seconds * 1000; elapsed_ms += check_interval_ms) {
+                // 检查是否还在处理中
+                if (!is_processing) {
+                    LOG_INFO("最后段延迟处理：处理已停止，提前结束延迟");
+                    break;
+                }
+                
+                // 每秒记录一次进度
+                int current_seconds = elapsed_ms / 1000;
+                if (current_seconds > logged_seconds) {
+                    logged_seconds = current_seconds;
+                    LOG_INFO("最后段延迟处理：等待中... " + std::to_string(current_seconds) + "/" + 
+                           std::to_string(total_delay_seconds) + "秒");
+                }
+                
+                // 检查是否有活跃的识别请求
+                bool has_active_requests = false;
+                
+                // 非阻塞检查请求状态
+                {
+                    std::unique_lock<std::mutex> lock(active_requests_mutex, std::try_to_lock);
+                    if (lock.owns_lock()) {
+                        has_active_requests = !active_requests.empty();
+                        if (has_active_requests) {
+                            LOG_INFO("最后段延迟处理：发现活跃请求 " + std::to_string(active_requests.size()) + " 个，继续等待");
+                        }
+                    }
+                }
+                
+                // 检查是否有快速识别结果待处理
+                bool has_fast_results = false;
+                if (fast_results) {
+                    has_fast_results = !fast_results->empty();
+                    if (has_fast_results) {
+                        LOG_INFO("最后段延迟处理：发现快速识别结果待处理，继续等待");
+                    }
+                }
+                
+                // 检查parallel_processor是否有活跃的段
+                bool has_active_segments = false;
+                if (parallel_processor) {
+                    // 注意：不调用hasActiveSegments()，因为它可能不存在
+                    // 简单假设如果parallel_processor存在且在处理中就可能有活跃段
+                    has_active_segments = true;  // 保守估计
+                }
+                
+                // 如果没有任何活跃的处理，可以提前结束
+                if (!has_active_requests && !has_fast_results && !has_active_segments && elapsed_ms > 2000) {
+                    LOG_INFO("最后段延迟处理：未发现活跃处理，延迟" + std::to_string(elapsed_ms) + "ms后提前结束");
+                    break;
+                }
+                
+                // 等待检查间隔
+                std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
+            }
+            
+            auto end_time = std::chrono::steady_clock::now();
+            auto actual_delay = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+            
+            LOG_INFO("最后段延迟处理完成，实际等待时间：" + std::to_string(actual_delay) + "ms");
+            
+            // 延迟处理完成后，确保处理状态正确设置
+            if (is_processing) {
+                LOG_INFO("最后段延迟处理：延迟完成，设置处理完全停止");
+                QMetaObject::invokeMethod(this, [this]() {
+                    emit processingFullyStopped();
+                }, Qt::QueuedConnection);
+            }
+            
+        } catch (const std::exception& e) {
+            LOG_ERROR("最后段延迟处理异常: " + std::string(e.what()));
+        } catch (...) {
+            LOG_ERROR("最后段延迟处理遇到未知异常");
+        }
+    });
+    
+    // 分离线程，让它在后台执行
+    delay_thread.detach();
 }
 
 
