@@ -24,6 +24,9 @@
 #include <audio_preprocessor.h>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QPointer>
+#include <unordered_set>
+#include <set>
 //#include "result_queue.h"
 //#include "recognizer.h"
 //#include "translator.h"
@@ -227,6 +230,24 @@ public:
     void setUseDualSegmentRecognition(bool enable);
     bool getUseDualSegmentRecognition() const;
     
+    // 清理推送缓存的方法
+    void clearPushCache();
+    
+    // 静态方法：安全清理所有AudioProcessor实例
+    static void cleanupAllInstances();
+    
+    // 检查对象是否已初始化
+    bool isInitialized() const { return is_initialized; }
+    
+    // 安全创建媒体播放器的方法
+    void createMediaPlayerSafely();
+    
+    // 延迟初始化VAD实例（在Qt multimedia完全初始化后调用）
+    bool initializeVADSafely();
+    
+    // 检查VAD是否已初始化
+    bool isVADInitialized() const;
+    
 public slots:
     // 从ResultMerger接收结果
     void openAIResultReady(const QString& result);
@@ -276,7 +297,7 @@ private:
     void processCurrentSegment(const std::vector<AudioBuffer>& segment_buffers, 
                               const std::string& temp_dir, 
                               size_t segment_num);
-    
+                              
     // 根据识别模式处理音频数据
     void processAudioDataByMode(const std::vector<float>& audio_data);
     
@@ -413,4 +434,35 @@ private:
     size_t target_energy_samples{0};  // 目标收集样本数（1-2分钟的音频）
     bool adaptive_threshold_ready{false};  // 自适应阈值是否已准备好
     float base_energy_level{0.0f};  // 基础能量水平
+    
+    // 添加防止重复推送到GUI的机制
+    std::unordered_set<std::string> pushed_results_cache;  // 缓存已推送的结果hash
+    std::mutex push_cache_mutex;  // 保护缓存的互斥锁
+    
+    // 生成结果的唯一标识符的方法
+    std::string generateResultHash(const QString& result, const std::string& source_type);
+    
+    // 安全推送结果到GUI的方法
+    bool safePushToGUI(const QString& result, const std::string& output_type, const std::string& source_type);
+    
+    // 静态成员：跟踪所有AudioProcessor实例
+    static std::set<AudioProcessor*> all_instances;
+    static std::mutex instances_mutex;
+    
+    // 网络超时和重试机制
+    struct RequestInfo {
+        int retry_count = 0;
+        std::chrono::system_clock::time_point start_time;
+        std::string file_path;
+        RecognitionParams params;
+        qint64 file_size = 0;
+    };
+    
+    std::unordered_map<int, RequestInfo> active_requests;
+    std::mutex active_requests_mutex;
+    
+    // 动态超时计算
+    int calculateDynamicTimeout(qint64 file_size_bytes);
+    bool shouldRetryRequest(int request_id, QNetworkReply::NetworkError error);
+    void retryRequest(int request_id);
 };

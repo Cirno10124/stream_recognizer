@@ -214,8 +214,8 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
             
             // 直接调用回调
             segment_ready_callback(segment);
-        }
-        
+    }
+    
         // 清理当前缓冲区
         current_buffers.clear();
         total_samples = 0;

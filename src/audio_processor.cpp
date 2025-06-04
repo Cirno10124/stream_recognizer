@@ -52,13 +52,17 @@ namespace fs = std::filesystem;
 // 全局变量声明
 extern bool g_use_gpu;
 
+// 静态成员变量定义
+std::set<AudioProcessor*> AudioProcessor::all_instances;
+std::mutex AudioProcessor::instances_mutex;
+
 //初始化识别参数
 AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
     : QObject(parent)
     , gui(gui)
     , current_input_mode(InputMode::MICROPHONE)
-    , media_player(new QMediaPlayer(this))
-    , audio_output(new QAudioOutput(this))
+    , media_player(nullptr)  // 延迟初始化
+    , audio_output(nullptr)  // 延迟初始化
     , video_widget(nullptr)
     , batch_size(50)  // 增加批次大小从15到50，减少临时文件生成频率
     , is_processing(false)
@@ -78,62 +82,211 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
     , pre_emphasis_coef(0.97f)
     , pending_audio_samples(0)
     , next_request_id(1)
+    , precise_network_manager(nullptr)  // 初始化为nullptr
 {
+    try {
+        LOG_INFO("开始初始化AudioProcessor...");
+        
     // 初始化基本参数
     use_gpu = g_use_gpu;
     
-    // 初始化自适应VAD相关变量（在创建VAD检测器之前）
-    use_adaptive_vad = true;
-    energy_history.clear();
-    energy_samples_collected = 0;
-    target_energy_samples = sample_rate * 90;  // 90秒的音频用于计算基础能量
-    adaptive_threshold_ready = false;
-    base_energy_level = 0.0f;
-    adaptive_threshold = 0.01f;  // 初始阈值
-    
-    // 初始化VAD检测器 - 使用自适应阈值作为初始值，但不传入this作为父对象
-    vad = std::make_unique<VoiceActivityDetector>(adaptive_threshold, nullptr);
-    voice_detector = std::make_unique<VoiceActivityDetector>(adaptive_threshold, nullptr);
-    
-    // 初始化音频预处理器
+        // 初始化自适应VAD相关变量（在创建VAD检测器之前）
+        use_adaptive_vad = true;
+        energy_history.clear();
+        energy_samples_collected = 0;
+        target_energy_samples = sample_rate * 90;  // 90秒的音频用于计算基础能量
+        adaptive_threshold_ready = false;
+        base_energy_level = 0.0f;
+        adaptive_threshold = 0.01f;  // 初始阈值
+        
+        LOG_INFO("初始化VAD检测器...");
+        
+        // VAD将在Qt multimedia完全初始化后延迟创建
+        // 这样可以避免与Qt FFmpeg的堆内存分配冲突
+        LOG_INFO("VAD检测器将延迟初始化，避免与Qt multimedia冲突");
+        
+        LOG_INFO("初始化音频预处理器...");
+        
+        // 安全初始化音频预处理器
+        try {
     audio_preprocessor = std::make_unique<AudioPreprocessor>();
+            LOG_INFO("音频预处理器初始化成功");
+        } catch (const std::exception& e) {
+            LOG_ERROR("音频预处理器初始化失败: " + std::string(e.what()));
+            throw std::runtime_error("Failed to initialize audio preprocessor: " + std::string(e.what()));
+        }
     
-    // 创建音频队列
-    audio_queue = std::make_unique<AudioQueue>();
+        LOG_INFO("初始化音频队列...");
     
-    // 初始化结果队列
+        // 安全创建音频队列
+        try {
+            audio_queue = std::make_unique<AudioQueue>();
     fast_results = std::make_unique<ResultQueue>();
     precise_results = std::make_unique<ResultQueue>();
     final_results = std::make_unique<ResultQueue>();
-    
-    // 配置媒体播放器
-    if (media_player && audio_output) {
-    media_player->setAudioOutput(audio_output);
-    }
+            LOG_INFO("音频队列初始化成功");
+        } catch (const std::exception& e) {
+            LOG_ERROR("音频队列初始化失败: " + std::string(e.what()));
+            throw std::runtime_error("Failed to initialize audio queues: " + std::string(e.what()));
+        }
+        
+        LOG_INFO("初始化媒体播放器...");
+        
+        // 安全配置媒体播放器（延迟到需要时再创建）
+        try {
+            // 增强安全检查：确保Qt应用程序和主线程都有效
+            QCoreApplication* app_instance = QCoreApplication::instance();
+            QThread* current_thread = QThread::currentThread();
+            
+            if (!app_instance) {
+                LOG_WARNING("QCoreApplication实例不存在，无法创建媒体播放器");
+                media_player = nullptr;
+                audio_output = nullptr;
+            } else if (!current_thread) {
+                LOG_WARNING("当前线程对象无效，无法创建媒体播放器");
+                media_player = nullptr;
+                audio_output = nullptr;
+            } else {
+                QThread* main_thread = app_instance->thread();
+                if (!main_thread) {
+                    LOG_WARNING("主线程对象无效，无法创建媒体播放器");
+                    media_player = nullptr;
+                    audio_output = nullptr;
+                } else if (current_thread == main_thread) {
+                    // 只在所有条件都安全的情况下创建
+                    LOG_INFO("安全条件满足，在主线程中创建媒体播放器");
+                    
+                    // 使用try-catch包装每个创建操作
+                    try {
+                        media_player = new QMediaPlayer();  // 不设置父对象，避免构造函数中的this指针问题
+                        LOG_INFO("QMediaPlayer创建成功");
+                    } catch (const std::exception& e) {
+                        LOG_ERROR("QMediaPlayer创建失败: " + std::string(e.what()));
+                        media_player = nullptr;
+                    } catch (...) {
+                        LOG_ERROR("QMediaPlayer创建失败: 未知异常");
+                        media_player = nullptr;
+                    }
+                    
+                    try {
+                        audio_output = new QAudioOutput();  // 不设置父对象，避免构造函数中的this指针问题
+                        LOG_INFO("QAudioOutput创建成功");
+                    } catch (const std::exception& e) {
+                        LOG_ERROR("QAudioOutput创建失败: " + std::string(e.what()));
+                        audio_output = nullptr;
+                    } catch (...) {
+                        LOG_ERROR("QAudioOutput创建失败: 未知异常");
+                        audio_output = nullptr;
+                    }
+                    
+                    // 如果两者都创建成功，则连接它们
+                    if (media_player && audio_output) {
+                        try {
+                            media_player->setAudioOutput(audio_output);
+                            LOG_INFO("媒体播放器初始化成功");
+                        } catch (const std::exception& e) {
+                            LOG_ERROR("连接媒体播放器和音频输出失败: " + std::string(e.what()));
+                            // 清理已创建的对象
+                            if (media_player) {
+                                delete media_player;
+                                media_player = nullptr;
+                            }
+                            if (audio_output) {
+                                delete audio_output;
+                                audio_output = nullptr;
+                            }
+                        }
+                    } else {
+                        LOG_ERROR("媒体播放器或音频输出创建失败，清理资源");
+                        // 清理部分创建的对象
+                        if (media_player) {
+                            delete media_player;
+                            media_player = nullptr;
+                        }
+                        if (audio_output) {
+                            delete audio_output;
+                            audio_output = nullptr;
+                        }
+                    }
+                } else {
+                    LOG_WARNING("不在主线程中（当前线程: " + 
+                                QString::number(reinterpret_cast<quintptr>(current_thread)).toStdString() + 
+                                ", 主线程: " + 
+                                QString::number(reinterpret_cast<quintptr>(main_thread)).toStdString() + 
+                                "），延迟创建媒体播放器");
+                    media_player = nullptr;
+                    audio_output = nullptr;
+                }
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("媒体播放器初始化失败: " + std::string(e.what()));
+            // 确保指针为空
+            media_player = nullptr;
+            audio_output = nullptr;
+        } catch (...) {
+            LOG_ERROR("媒体播放器初始化失败: 未知异常");
+            // 确保指针为空
+            media_player = nullptr;
+            audio_output = nullptr;
+        }
+        
+        LOG_INFO("加载配置参数...");
     
     // 从配置加载所有参数
     initializeParameters();
+        
+        // 初始化防重复推送缓存
+        pushed_results_cache.clear();
+        
+        // 初始化活动请求容器
+        active_requests.clear();
     
     // 设置初始化完成标志
     is_initialized = true;
-    
-    std::cout << "[INFO] 初始化音频处理器完成" << std::endl;
-    std::cout << "[INFO] 默认识别模式: " << static_cast<int>(current_recognition_mode) << " (0=快速, 1=精确, 2=OpenAI)" << std::endl;
-    std::cout << "[INFO] 要使用精确识别模式，请在GUI中设置或调用setRecognitionMode(RecognitionMode::PRECISE_RECOGNITION)" << std::endl;
-    std::cout << "[INFO] 精确识别服务器URL: " << precise_server_url << std::endl;
-    
-    if (gui) {
-        logMessage(gui, "音频处理器初始化完成，当前为快速识别模式");
-        logMessage(gui, "要使用精确识别，请在设置中切换识别模式");
-    }
-    
-    // 临时测试代码：强制设置为精确识别模式以便调试
-    std::cout << "[TEST] === 临时测试：强制设置为精确识别模式 ===" << std::endl;
-    current_recognition_mode = RecognitionMode::PRECISE_RECOGNITION;
-    std::cout << "[TEST] 识别模式已强制设置为精确识别: " << static_cast<int>(current_recognition_mode) << std::endl;
-    
-    if (gui) {
-        logMessage(gui, "=== 临时测试：已强制设置为精确识别模式 ===");
+        
+        LOG_INFO("AudioProcessor初始化完成");
+        LOG_INFO("默认识别模式: " + std::to_string(static_cast<int>(current_recognition_mode)) + " (0=快速, 1=精确, 2=OpenAI)");
+        LOG_INFO("要使用精确识别模式，请在GUI中设置或调用setRecognitionMode(RecognitionMode::PRECISE_RECOGNITION)");
+        LOG_INFO("精确识别服务器URL: " + precise_server_url);
+        
+        if (gui) {
+            logMessage(gui, "音频处理器初始化完成，当前为快速识别模式");
+            logMessage(gui, "要使用精确识别，请在设置中切换识别模式");
+        }
+        
+        // 注册实例到全局跟踪集合
+        {
+            std::lock_guard<std::mutex> lock(instances_mutex);
+            all_instances.insert(this);
+            LOG_INFO("AudioProcessor实例已注册，当前实例数: " + std::to_string(all_instances.size()));
+        }
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("AudioProcessor构造函数异常: " + std::string(e.what()));
+        
+        // 清理已分配的资源
+        try {
+            if (vad) vad.reset();
+            if (voice_detector) voice_detector.reset();
+            if (audio_preprocessor) audio_preprocessor.reset();
+            if (audio_queue) audio_queue.reset();
+            if (fast_results) fast_results.reset();
+            if (precise_results) precise_results.reset();
+            if (final_results) final_results.reset();
+            
+            // Qt对象会通过父子关系自动清理
+            media_player = nullptr;
+            audio_output = nullptr;
+        } catch (...) {
+            LOG_ERROR("清理构造函数资源时发生异常");
+        }
+        
+        is_initialized = false;
+        throw;  // 重新抛出异常
+    } catch (...) {
+        LOG_ERROR("AudioProcessor构造函数发生未知异常");
+        is_initialized = false;
+        throw std::runtime_error("Unknown error during AudioProcessor construction");
     }
 }
 
@@ -141,90 +294,172 @@ AudioProcessor::~AudioProcessor() {
     // 记录析构开始
     std::cout << "[INFO] AudioProcessor destructor called - cleaning up resources" << std::endl;
     
+    // 从全局跟踪集合中注销实例
+    {
+        std::lock_guard<std::mutex> lock(instances_mutex);
+        auto it = all_instances.find(this);
+        if (it != all_instances.end()) {
+            all_instances.erase(it);
+            LOG_INFO("AudioProcessor实例已注销，剩余实例数: " + std::to_string(all_instances.size()));
+        } else {
+            LOG_WARNING("AudioProcessor实例未在跟踪集合中找到");
+        }
+    }
+    
+    // 设置析构标志，防止其他线程访问
+    static std::atomic<bool> destroying{false};
+    if (destroying.exchange(true)) {
+        LOG_ERROR("AudioProcessor destructor called multiple times - preventing double destruction");
+        return;
+    }
+    
     try {
-        // 停止所有处理线程
+        // 首先停止所有处理线程和网络操作
         if (is_processing) {
+            LOG_INFO("Stopping processing during destruction");
             stopProcessing();
         }
 
-        // 等待处理线程结束
+        // 断开所有信号连接，防止析构过程中的回调
+        if (gui) {
+            disconnect(this, nullptr, gui, nullptr);
+            disconnect(gui, nullptr, this, nullptr);
+            LOG_INFO("Disconnected all signals from GUI");
+        }
+        
+        // 停止并清理网络管理器（必须在主线程中）
+        if (precise_network_manager) {
+            LOG_INFO("Cleaning up network manager");
+            
+            // 取消所有未完成的网络请求
+            precise_network_manager->clearAccessCache();
+            precise_network_manager->clearConnectionCache();
+            
+            // 断开所有网络信号
+            disconnect(precise_network_manager, nullptr, this, nullptr);
+            
+            // 安全删除网络管理器
+            precise_network_manager->deleteLater();
+            precise_network_manager = nullptr;
+            
+            LOG_INFO("Network manager cleaned up");
+        }
+
+        // 等待处理线程结束（带超时）
         if (process_thread.joinable()) {
-            if (gui) {
-                logMessage(gui, "Waiting for processing thread to finish...");
+            LOG_INFO("Waiting for processing thread to finish...");
+            
+            // 设置合理的超时时间
+            auto timeout_time = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            bool thread_finished = false;
+            
+            // 使用条件等待而不是无限期等待
+            std::thread timeout_thread([this, timeout_time, &thread_finished]() {
+                while (process_thread.joinable() && std::chrono::steady_clock::now() < timeout_time) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                thread_finished = true;
+            });
+            
+            if (timeout_thread.joinable()) {
+                timeout_thread.join();
             }
             
-            // 设置超时，避免永久等待
-            auto timeout = std::chrono::system_clock::now() + std::chrono::seconds(5);
-            
-            std::thread([this, timeout]() {
-                while (process_thread.joinable()) {
-                    if (std::chrono::system_clock::now() > timeout) {
-                        std::cout << "[WARNING] Processing thread join timeout, may cause resource leaks" << std::endl;
-                        break;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
-            }).detach();
-            
-            try {
+            if (process_thread.joinable()) {
+                if (thread_finished) {
                 process_thread.join();
-                if (gui) {
-                    logMessage(gui, "Processing thread finished successfully");
-                }
-            } catch (const std::exception& e) {
-                std::cout << "[ERROR] Error joining processing thread: " << e.what() << std::endl;
-                if (gui) {
-                    logMessage(gui, "Error joining processing thread", true);
-                }
+                    LOG_INFO("Processing thread joined successfully");
+                } else {
+                    LOG_WARNING("Processing thread join timeout - detaching thread");
+                    process_thread.detach();
+            } 
             }
         }
         
-        // 释放AI相关资源
+        // 按依赖顺序清理AI相关资源
         LOG_INFO("正在释放AI相关资源...");
+        
+        // 首先停止并清理并行处理器
         if (parallel_processor) {
+            try {
             parallel_processor->stop();
-            parallel_processor = nullptr;
+                parallel_processor.reset();
+                LOG_INFO("Parallel processor cleaned up");
+            } catch (const std::exception& e) {
+                LOG_ERROR("Error cleaning parallel processor: " + std::string(e.what()));
+            }
         }
         
+        // 然后清理识别器
         if (fast_recognizer) {
-            fast_recognizer = nullptr;
+            try {
+                fast_recognizer.reset();
+                LOG_INFO("Fast recognizer cleaned up");
+            } catch (const std::exception& e) {
+                LOG_ERROR("Error cleaning fast recognizer: " + std::string(e.what()));
+            }
         }
         
         if (preloaded_fast_recognizer) {
-            preloaded_fast_recognizer = nullptr;
+            try {
+                preloaded_fast_recognizer.reset();
+                LOG_INFO("Preloaded fast recognizer cleaned up");
+            } catch (const std::exception& e) {
+                LOG_ERROR("Error cleaning preloaded fast recognizer: " + std::string(e.what()));
+            }
         }
         
-
-        
-        // 释放队列资源
+        // 清理队列资源
         LOG_INFO("正在释放队列资源...");
-        fast_results = nullptr;
-        precise_results = nullptr;
-        final_results = nullptr;
-        audio_queue = nullptr;
+        try {
+            if (fast_results) fast_results.reset();
+            if (precise_results) precise_results.reset();
+            if (final_results) final_results.reset();
+            if (audio_queue) audio_queue.reset();
+            LOG_INFO("Queue resources cleaned up");
+        } catch (const std::exception& e) {
+            LOG_ERROR("Error cleaning queue resources: " + std::string(e.what()));
+        }
         
         // 清理音频处理相关资源
         LOG_INFO("正在释放音频处理资源...");
-        audio_capture = nullptr;
-        file_input = nullptr;
-        voice_detector = nullptr;
-        vad = nullptr;
-        audio_preprocessor = nullptr;
-        segment_handler = nullptr;
+        try {
+            if (audio_capture) audio_capture.reset();
+            if (file_input) file_input.reset();
+            if (voice_detector) voice_detector.reset();
+            if (vad) vad.reset();
+            if (audio_preprocessor) audio_preprocessor.reset();
+            if (segment_handler) segment_handler.reset();
+            LOG_INFO("Audio processing resources cleaned up");
+        } catch (const std::exception& e) {
+            LOG_ERROR("Error cleaning audio processing resources: " + std::string(e.what()));
+        }
         
-        // 清理网络管理器
-        if (precise_network_manager) {
-            delete precise_network_manager;
-            precise_network_manager = nullptr;
+        // 清理推送缓存
+        {
+            std::lock_guard<std::mutex> lock(push_cache_mutex);
+            pushed_results_cache.clear();
+            LOG_INFO("推送缓存已清理");
+        }
+        
+        // 清理活动请求信息
+        {
+            std::lock_guard<std::mutex> lock(active_requests_mutex);
+            active_requests.clear();
+            LOG_INFO("活动请求信息已清理");
         }
         
         // 清理临时文件
         if (!temp_wav_path.empty()) {
             try {
                 LOG_INFO("在析构函数中清理临时文件: " + temp_wav_path);
+                if (std::filesystem::exists(temp_wav_path)) {
                 std::filesystem::remove(temp_wav_path);
-                temp_wav_path.clear();
                 LOG_INFO("临时文件清理成功");
+                } else {
+                    LOG_INFO("临时文件不存在，无需清理");
+                }
+                temp_wav_path.clear();
             } catch (const std::exception& e) {
                 LOG_ERROR("析构函数中清理临时文件失败: " + std::string(e.what()));
             }
@@ -235,44 +470,49 @@ AudioProcessor::~AudioProcessor() {
         try {
             // 停止播放并清除源
             if (media_player) {
+                // 断开所有信号连接
+                disconnect(media_player, nullptr, this, nullptr);
+                
                 media_player->stop();
                 media_player->setSource(QUrl());
                 
                 // 断开与视频组件的连接
                 if (video_widget && video_widget->videoSink()) {
-                    // 重置视频sink以释放Direct3D资源
                     media_player->setVideoSink(nullptr);
                 }
+                
+                // 不删除media_player，让Qt的父子关系处理
+                media_player = nullptr;
+                LOG_INFO("媒体播放器已断开连接");
             }
             
-            // 先删除视频组件
-            if (video_widget) {
-                // 不删除视频组件，只断开连接，因为它可能是GUI拥有的
+            // 不删除video_widget，它可能是GUI拥有的
                 video_widget = nullptr;
                 LOG_INFO("视频组件连接已断开");
-            }
             
-            // 然后删除音频输出
+            // 清理音频输出
             if (audio_output) {
-                delete audio_output;
+                // 不直接删除，让Qt的父子关系处理
                 audio_output = nullptr;
-                LOG_INFO("音频输出已释放");
+                LOG_INFO("音频输出已断开连接");
             }
             
-            // 最后删除媒体播放器
-            if (media_player) {
-                delete media_player;
-                media_player = nullptr;
-                LOG_INFO("媒体播放器已释放");
-            }
         } catch (const std::exception& e) {
             LOG_ERROR("清理媒体资源时出错: " + std::string(e.what()));
         }
+        
     } catch (const std::exception& e) {
         LOG_ERROR("析构函数清理过程中出现异常: " + std::string(e.what()));
+        
+        // 即使出现异常，也要重置destroying标志
+        destroying = false;
     } catch (...) {
         LOG_ERROR("析构函数清理过程中出现未知异常");
+        destroying = false;
     }
+    
+    // 重置destroying标志
+    destroying = false;
     
     LOG_INFO("AudioProcessor析构函数执行完成");
 }
@@ -461,7 +701,7 @@ bool AudioProcessor::extractAudioFromVideo(const std::string& video_path, const 
     std::thread extraction_thread([this, video_path, audio_path, &extraction_complete, &extraction_success]() {
         try {
             // 异步更新开始日志
-            if (gui) {
+        if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
                     Qt::QueuedConnection, 
                     Q_ARG(QString, QString("开始从视频提取音频: %1").arg(QString::fromStdString(video_path))));
@@ -485,7 +725,7 @@ bool AudioProcessor::extractAudioFromVideo(const std::string& video_path, const 
                                 .arg(QString::fromStdString(audio_path));
             
             // 异步更新执行命令日志
-            if (gui) {
+    if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
                     Qt::QueuedConnection, 
                     Q_ARG(QString, QString("执行FFmpeg命令: %1").arg(ffmpeg_cmd)));
@@ -532,11 +772,10 @@ bool AudioProcessor::extractAudioFromVideo(const std::string& video_path, const 
             
         } catch (const std::exception& e) {
             // 异步更新错误日志
-            if (gui) {
+    if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
                     Qt::QueuedConnection, 
-                    Q_ARG(QString, QString("音频提取失败: %1").arg(QString::fromStdString(e.what()))),
-                    Q_ARG(bool, true));
+                    Q_ARG(QString, QString("音频提取失败: %1").arg(QString::fromStdString(e.what()))));
             }
             extraction_success = false;
         }
@@ -564,6 +803,9 @@ void AudioProcessor::startProcessing() {
         auto start_time = std::chrono::steady_clock::now();
         is_processing = true;
         is_paused = false;
+        
+        // 清理推送缓存，防止新会话中出现重复推送
+        clearPushCache();
         
         // 重置自适应VAD，开始新的能量收集
         resetAdaptiveVAD();
@@ -869,8 +1111,8 @@ bool AudioProcessor::preloadModels(std::function<void(const std::string&)> progr
     std::atomic<bool> loading_success{false};
     
     std::thread loading_thread([this, &loading_complete, &loading_success, progress_callback]() {
-        try {
-            auto& config = ConfigManager::getInstance();
+    try {
+        auto& config = ConfigManager::getInstance();
             
             if (progress_callback) progress_callback("Loading configuration...");
             
@@ -897,7 +1139,7 @@ bool AudioProcessor::preloadModels(std::function<void(const std::string&)> progr
             loading_success = true;
             
         } catch (const std::exception& e) {
-            if (progress_callback) {
+        if (progress_callback) {
                 progress_callback(std::string("Loading failed: ") + e.what());
             }
             loading_success = false;
@@ -994,6 +1236,21 @@ QVideoWidget* AudioProcessor::getVideoWidget() {
 void AudioProcessor::startMediaPlayback(const QString& file_path) {
     if (gui) {
         logMessage(gui, "Starting media playback: " + file_path.toStdString());
+    }
+    
+    // 如果媒体播放器尚未创建，则安全创建
+    if (!media_player || !audio_output) {
+        LOG_INFO("媒体播放器未创建，开始安全创建...");
+        createMediaPlayerSafely();
+        
+        // 检查创建是否成功
+        if (!media_player || !audio_output) {
+            LOG_ERROR("媒体播放器创建失败，无法开始播放");
+            if (gui) {
+                logMessage(gui, "媒体播放器初始化失败，无法播放文件", true);
+            }
+            return;
+        }
     }
     
     try {
@@ -1429,7 +1686,7 @@ bool AudioProcessor::processWithOpenAI(const std::string& audio_file_path) {
                 std::string error = "Audio file does not exist: " + audio_file_path;
                 
                 // 异步更新日志
-                if (gui) {
+        if (gui) {
                     QMetaObject::invokeMethod(gui, "appendLogMessage", 
                         Qt::QueuedConnection, 
                         Q_ARG(QString, QString::fromStdString(error)),
@@ -1444,7 +1701,7 @@ bool AudioProcessor::processWithOpenAI(const std::string& audio_file_path) {
             
             if (fileSize > 50 * 1024 * 1024) { // 50MB限制
                 LOG_WARNING("Audio file is very large (" + std::to_string(fileSize / 1024 / 1024) + " MB), upload may fail");
-                if (gui) {
+    if (gui) {
                     QMetaObject::invokeMethod(gui, "appendLogMessage", 
                         Qt::QueuedConnection, 
                         Q_ARG(QString, QString("Warning: Large file size may cause upload issues (%1 MB)").arg(fileSize / 1024 / 1024)),
@@ -1452,19 +1709,19 @@ bool AudioProcessor::processWithOpenAI(const std::string& audio_file_path) {
                 }
             }
             
-            if (fileSize == 0) {
+    if (fileSize == 0) {
                 LOG_ERROR("Audio file is empty");
-                if (gui) {
+        if (gui) {
                     QMetaObject::invokeMethod(gui, "appendLogMessage", 
                         Qt::QueuedConnection, 
                         Q_ARG(QString, QString("Error: Audio file is empty")),
                         Q_ARG(bool, true));
-                }
+        }
                 return; // 修复：删除false，因为lambda返回类型是void
-            }
-            
+    }
+    
             // 异步记录开始处理
-            if (gui) {
+    if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
                     Qt::QueuedConnection, 
                     Q_ARG(QString, QString("开始OpenAI处理: %1").arg(QString::fromStdString(audio_file_path))));
@@ -1481,16 +1738,16 @@ bool AudioProcessor::processWithOpenAI(const std::string& audio_file_path) {
                 parallel_processor->addSegment(segment);
                 
                 // 异步记录成功
-                if (gui) {
+        if (gui) {
                     QMetaObject::invokeMethod(gui, "appendLogMessage", 
                         Qt::QueuedConnection, 
                         Q_ARG(QString, QString("已提交OpenAI处理: %1").arg(QString::fromStdString(audio_file_path))));
                 }
-            } else {
+        } else {
                 std::string error = "OpenAI parallel processor not initialized";
                 
                 // 异步更新错误日志
-                if (gui) {
+        if (gui) {
                     QMetaObject::invokeMethod(gui, "appendLogMessage", 
                         Qt::QueuedConnection, 
                         Q_ARG(QString, QString::fromStdString(error)),
@@ -1502,9 +1759,9 @@ bool AudioProcessor::processWithOpenAI(const std::string& audio_file_path) {
             std::string error = "OpenAI processing error: " + std::string(e.what());
             
             // 异步更新错误日志
-            if (gui) {
+    if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
-                    Qt::QueuedConnection, 
+                                 Qt::QueuedConnection, 
                     Q_ARG(QString, QString::fromStdString(error)),
                     Q_ARG(bool, true));
             }
@@ -1726,17 +1983,13 @@ void AudioProcessor::openAIResultReady(const QString& result) {
     // 记录该方法被调用
     std::cout << "[INFO] AudioProcessor::openAIResultReady 被调用，结果长度: " << result.length() << " 字符" << std::endl;
     
-    // 直接调用GUI方法，不使用信号
-    if (gui) {
-        std::cout << "[INFO] 直接调用GUI的appendOpenAIOutput方法显示结果" << std::endl;
-        
-        // 尝试在GUI线程中安全调用appendOpenAIOutput方法
-        QMetaObject::invokeMethod(gui, "appendOpenAIOutput", 
-                                 Qt::QueuedConnection, 
-                                 Q_ARG(QString, result));
+    
+    // 使用安全推送方法，防止重复推送
+    if (safePushToGUI(result, "openai", "OpenAI_Direct")) {
+        std::cout << "[INFO] OpenAI结果已成功推送到GUI" << std::endl;
         
         // 如果启用了字幕，也添加到字幕系统
-        if (gui->isSubtitlesEnabled()) {
+        if (gui && gui->isSubtitlesEnabled()) {
             qint64 timestamp = gui->getCurrentMediaPosition();
             std::cout << "[INFO] 添加字幕，时间戳: " << timestamp << std::endl;
             QMetaObject::invokeMethod(gui, "onOpenAISubtitleReady", 
@@ -1745,7 +1998,7 @@ void AudioProcessor::openAIResultReady(const QString& result) {
                                      Q_ARG(qint64, timestamp));
         }
     } else {
-        std::cout << "[WARNING] GUI对象为空，无法显示OpenAI结果" << std::endl;
+        std::cout << "[INFO] OpenAI结果未推送（可能是重复或失败）" << std::endl;
     }
     
     // 不再发送信号
@@ -1950,12 +2203,70 @@ void AudioProcessor::processBufferForFile(const AudioBuffer& buffer) {
     if (buffer.is_last) {
         LOG_INFO("接收到文件处理的最后一个缓冲区");
         
+        // 在处理结束标记前，先强制处理当前累积的音频批次（如果有）
+        // 使用线程安全的方式处理最后一个批次
+        if (!current_batch.empty()) {
+            LOG_INFO("处理文件的最后不完整批次: " + std::to_string(current_batch.size()) + " 个缓冲区");
+            
+            // 使用std::lock_guard确保线程安全
+            {
+                std::lock_guard<std::mutex> batch_lock(request_mutex);
+                
+                // 在处理前进行音频段质量检查
+                if (isAudioSegmentValid(current_batch)) {
+                    // 根据当前识别模式选择处理方式
+                    switch (current_recognition_mode) {
+                        case RecognitionMode::FAST_RECOGNITION:
+                            if (fast_recognizer) {
+                                LOG_INFO("文件最后批次发送到快速识别器");
+                                fast_recognizer->process_audio_batch(current_batch);
+                            }
+                            break;
+                            
+                        case RecognitionMode::PRECISE_RECOGNITION:
+                            // 为精确识别器创建临时WAV并发送到服务器
+                            LOG_INFO("文件最后批次发送到精确识别服务");
+                            {
+                                std::string temp_wav = getTempAudioPath();
+                                if (WavFileUtils::saveWavBatch(temp_wav, current_batch, SAMPLE_RATE)) {
+                                    RecognitionParams params;
+                                    params.language = current_language;
+                                    params.use_gpu = use_gpu;
+                                    sendToPreciseServer(temp_wav, params);
+                                }
+                            }
+                            break;
+                            
+                        case RecognitionMode::OPENAI_RECOGNITION:
+                            if (parallel_processor) {
+                                LOG_INFO("文件最后批次发送到OpenAI处理器");
+                                std::string temp_file = getTempAudioPath();
+                                if (WavFileUtils::saveWavBatch(temp_file, current_batch, SAMPLE_RATE)) {
+                                    AudioSegment segment;
+                                    segment.filepath = temp_file;
+                                    segment.timestamp = std::chrono::system_clock::now();
+                                    segment.is_last = true;  // 标记为最后一个段
+                                    parallel_processor->addSegment(segment);
+                                }
+                            }
+                            break;
+                    }
+                } else {
+                    LOG_INFO("文件最后批次音频段质量不符合要求，跳过处理");
+                }
+                
+                // 处理完后清空批次
+                current_batch.clear();
+            }
+        }
+        
         // 如果启用了实时分段，发送结束标记到分段处理器
         if (use_realtime_segments && segment_handler) {
             AudioBuffer end_marker = buffer;
             end_marker.is_last = true;
             segment_handler->addBuffer(end_marker);
         }
+        
         return;
     }
     
@@ -2326,8 +2637,8 @@ void AudioProcessor::processCurrentSegment(const std::vector<AudioBuffer>& segme
                     }
                     break;
             }
-            
-        } catch (const std::exception& e) {
+        
+    } catch (const std::exception& e) {
             std::ostringstream error_stream;
             error_stream << "处理音频段时发生错误: " << e.what();
             
@@ -2426,6 +2737,12 @@ void AudioProcessor::initializeParameters() {
     pending_audio_data.clear();
     pending_audio_samples = 0;
     
+    // 初始化防重复推送缓存
+    pushed_results_cache.clear();
+    
+    // 初始化活动请求容器
+    active_requests.clear();
+    
     // 记录配置加载情况
     LOG_INFO("配置已从ConfigManager加载：");
     LOG_INFO("语言: " + current_language);
@@ -2461,8 +2778,8 @@ std::vector<float> AudioProcessor::preprocessAudioBuffer(const std::vector<float
         updateAdaptiveVADThreshold(audio_buffer);
         
         // 创建音频缓冲区副本进行处理
-        std::vector<float> processed_buffer = audio_buffer;
-        
+    std::vector<float> processed_buffer = audio_buffer;
+    
         // 恢复预加重处理
         if (use_pre_emphasis && audio_preprocessor) {
             float gentle_coef = std::min(pre_emphasis_coef, 0.95f);  // 限制预加重系数
@@ -2582,7 +2899,7 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
     
     try {
         // 检查音频文件是否存在
-        QFileInfo fileInfo(QString::fromStdString(audio_file_path));
+    QFileInfo fileInfo(QString::fromStdString(audio_file_path));
         if (!fileInfo.exists()) {
             std::string error = "Audio file does not exist: " + audio_file_path;
             
@@ -2593,9 +2910,9 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
                     Q_ARG(QString, QString::fromStdString(error)),
                     Q_ARG(bool, true));
             }
-            return false;
-        }
-        
+        return false;
+    }
+    
         // 检查文件大小（如果太大可能导致上传失败）
         qint64 fileSize = fileInfo.size();
         LOG_INFO("Audio file size: " + std::to_string(fileSize) + " bytes (" + std::to_string(fileSize / 1024) + " KB)");
@@ -2624,11 +2941,33 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
         // 生成唯一请求ID
         int request_id = next_request_id.fetch_add(1);
         
-        // 记录请求时间戳（用于超时检测）
-        {
-            std::lock_guard<std::mutex> lock(request_mutex);
-            request_timestamps[request_id] = std::chrono::system_clock::now();
+        // 保存请求时间戳
+    {
+        std::lock_guard<std::mutex> lock(request_mutex);
+        request_timestamps[request_id] = std::chrono::system_clock::now();
+    }
+    
+        // 获取文件大小用于动态超时计算
+        qint64 file_size = 0;
+        if (std::filesystem::exists(audio_file_path)) {
+            file_size = std::filesystem::file_size(audio_file_path);
         }
+        
+        // 保存请求信息用于重试机制
+        {
+            std::lock_guard<std::mutex> lock(active_requests_mutex);
+            RequestInfo& info = active_requests[request_id];
+            info.start_time = std::chrono::system_clock::now();
+            info.file_path = audio_file_path;
+            info.params = params;
+            info.file_size = file_size;
+            info.retry_count = 0;
+        }
+        
+        // 添加网络超时设置 - 使用动态超时
+        QTimer* timeoutTimer = new QTimer();
+        timeoutTimer->setSingleShot(true);
+        timeoutTimer->start(30000); // 30秒超时
         
         // 构建服务器URL
         QString serverUrl = QString::fromStdString(precise_server_url + "/recognize");
@@ -2657,7 +2996,7 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
         // 添加音频文件部分
         QHttpPart filePart;
         filePart.setHeader(QNetworkRequest::ContentDispositionHeader, 
-                       QVariant("form-data; name=\"file\"; filename=\"" + 
+                           QVariant("form-data; name=\"file\"; filename=\"" + 
                                fileInfo.fileName() + "\""));
         filePart.setHeader(QNetworkRequest::ContentTypeHeader, QVariant("audio/wav"));
         
@@ -2693,8 +3032,8 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
         QByteArray paramsData = paramsDoc.toJson();
         
         QHttpPart paramsPart;
-        paramsPart.setHeader(QNetworkRequest::ContentDispositionHeader,
-                           QVariant("form-data; name=\"params\""));
+        paramsPart.setHeader(QNetworkRequest::ContentDispositionHeader, 
+                            QVariant("form-data; name=\"params\""));
         paramsPart.setHeader(QNetworkRequest::ContentTypeHeader, QVariant("application/json"));
         paramsPart.setBody(paramsData);
         multiPart->append(paramsPart);
@@ -2713,9 +3052,13 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
         LOG_INFO("Request ID: " + std::to_string(request_id));
         
         // 添加网络超时设置
-        QTimer* timeoutTimer = new QTimer();
+        //QTimer* timeoutTimer = new QTimer();
         timeoutTimer->setSingleShot(true);
         timeoutTimer->start(30000); // 30秒超时
+        
+        // 使用QPointer来安全地跟踪reply的生命周期
+        QPointer<QNetworkReply> safeReply(reply);
+        QPointer<QTimer> safeTimer(timeoutTimer);
         
         // 设置网络管理器的超时和配置
         if (precise_network_manager) {
@@ -2727,6 +3070,20 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
         // 监控网络状态变化
         connect(reply, &QNetworkReply::errorOccurred, this, [this, request_id](QNetworkReply::NetworkError error) {
             LOG_ERROR("Network error occurred during request " + std::to_string(request_id) + ": " + std::to_string(error));
+            
+            // 检查是否应该重试
+            if (shouldRetryRequest(request_id, error)) {
+                LOG_INFO("准备重试请求 " + std::to_string(request_id));
+                retryRequest(request_id);
+                return;
+            }
+            
+            // 不重试的情况下，清理请求信息
+            {
+                std::lock_guard<std::mutex> lock(active_requests_mutex);
+                active_requests.erase(request_id);
+            }
+            
             switch (error) {
                 case QNetworkReply::RemoteHostClosedError:
                     LOG_ERROR("Remote host closed connection - Server may have rejected the file");
@@ -2746,17 +3103,52 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
             }
         });
         
-        // 连接超时处理
-        connect(timeoutTimer, &QTimer::timeout, this, [this, reply, request_id, timeoutTimer]() {
-            LOG_ERROR("Request " + std::to_string(request_id) + " timed out after 30 seconds");
-            reply->abort();
-            timeoutTimer->deleteLater();
+        // 连接超时处理 - 使用安全的指针检查和重试逻辑
+        connect(timeoutTimer, &QTimer::timeout, this, [this, safeReply, request_id, safeTimer]() {
+            LOG_ERROR("Request " + std::to_string(request_id) + " timed out");
+            
+            // 检查是否应该重试
+            if (shouldRetryRequest(request_id, QNetworkReply::TimeoutError)) {
+                LOG_INFO("超时后准备重试请求 " + std::to_string(request_id));
+                
+                // 取消当前请求
+                if (safeReply && !safeReply.isNull()) {
+                    safeReply->abort();
+                }
+                
+                // 清理定时器
+                if (safeTimer && !safeTimer.isNull()) {
+                    safeTimer->deleteLater();
+                }
+                
+                // 触发重试
+                retryRequest(request_id);
+                return;
+            }
+            
+            // 不重试的情况
+            {
+                std::lock_guard<std::mutex> lock(active_requests_mutex);
+                active_requests.erase(request_id);
+            }
+            
+            // 安全地检查reply是否仍然有效
+            if (safeReply && !safeReply.isNull()) {
+                LOG_INFO("Aborting network request " + std::to_string(request_id));
+                safeReply->abort();
+            } else {
+                LOG_INFO("Network reply already destroyed for request " + std::to_string(request_id));
+            }
+            
+            // 安全地清理定时器
+            if (safeTimer && !safeTimer.isNull()) {
+                safeTimer->deleteLater();
+            }
             
             if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
                     Qt::QueuedConnection, 
-                    Q_ARG(QString, QString("Request timeout: Server did not respond within 30 seconds")),
-                    Q_ARG(bool, true));
+                    Q_ARG(QString, QString("Request timeout: Server did not respond within the expected time")));
             }
         });
         
@@ -2783,6 +3175,12 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
             {
                 std::lock_guard<std::mutex> lock(request_mutex);
                 request_timestamps.erase(request_id);
+            }
+            
+            // 清理活动请求信息
+            {
+                std::lock_guard<std::mutex> lock(active_requests_mutex);
+                active_requests.erase(request_id);
             }
             
             if (reply->error() == QNetworkReply::NoError) {
@@ -2830,15 +3228,14 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
                 Q_ARG(QString, QString("Sending precise recognition request (ID: %1): %2")
                                      .arg(request_id).arg(QString::fromStdString(audio_file_path))));
         }
-        
-        return true;
+    
+    return true;
     } catch (const std::exception& e) {
         std::cerr << "Error sending request to precise server: " << e.what() << std::endl;
         if (gui) {
             QMetaObject::invokeMethod(gui, "appendLogMessage", 
                 Qt::QueuedConnection, 
-                Q_ARG(QString, QString("Error sending precise recognition request: %1").arg(QString::fromStdString(e.what()))),
-                Q_ARG(bool, true));
+                Q_ARG(QString, QString("Error sending precise recognition request: %1").arg(QString::fromStdString(e.what()))));
         }
         return false;
     }
@@ -2917,13 +3314,17 @@ void AudioProcessor::handlePreciseServerReply(QNetworkReply* reply) {
                 
                 // 在GUI中显示结果
                 if (gui) {
-                    QMetaObject::invokeMethod(gui, "appendFinalOutput", 
-                        Qt::QueuedConnection, Q_ARG(QString, result));
-                    
+                    // 使用安全推送方法，防止重复推送
+                    if (safePushToGUI(result, "final", "Precise_Recognition")) {
                     // 记录到日志
                     gui->appendLogMessage(QString("精确识别结果已收到 [%1], 置信度: %2")
                                           .arg(language)
                                           .arg(confidence));
+                    } else {
+                        // 记录重复推送日志
+                        gui->appendLogMessage(QString("精确识别结果重复，已跳过推送 [%1]")
+                                              .arg(language));
+                    }
                 }
                 
                 // 发送结果信号
@@ -3094,8 +3495,15 @@ void AudioProcessor::preciseResultReceived(int request_id, const QString& result
                      "ms, 持续时间: " + std::to_string(rec_result.duration) + "ms");
         }
         
-        // 触发信号
-        emit preciseServerResultReady(result);
+        // 触发信号 - 改为使用安全推送方法，避免重复输出
+        // emit preciseServerResultReady(result);
+        
+        // 通过safePushToGUI推送，避免重复输出
+        if (safePushToGUI(result, "final", "Precise_Server")) {
+            LOG_INFO("精确识别服务器结果已推送到GUI");
+        } else {
+            LOG_INFO("精确识别服务器结果未推送（可能是重复）");
+        }
         
         // 将结果添加到结果队列，供其他组件使用
         if (final_results) {
@@ -3448,11 +3856,10 @@ void AudioProcessor::processAudio() {
             
             // 检查是否是停止标记
             if (buffer.is_last) {
-                LOG_INFO("收到最后一个音频缓冲区，即将完成处理");
+                LOG_INFO("收到最后一个音频缓冲区，开始延迟处理以确保最后识别完成");
                 
                 // 向识别器发送结束信号
                 RecognitionResult end_marker;
-                // 设置结束标记
                 end_marker.is_last = true;
                 
                 // 根据当前识别模式，发送结束标记到对应队列
@@ -3460,8 +3867,77 @@ void AudioProcessor::processAudio() {
                     fast_results->push(end_marker);
                 }
                 
-                // 等待一段时间，确保所有剩余处理完成
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                // 延迟等待机制：确保最后一段语音能够被处理完成
+                // 总等待时间：8秒（在原有1秒基础上增加7秒）
+                const int total_delay_seconds = 8;
+                const int check_interval_ms = 100;  // 检查间隔100毫秒
+                int checks_performed = 0;
+                const int max_checks = (total_delay_seconds * 1000) / check_interval_ms;
+                
+                LOG_INFO("开始延迟等待，最多等待 " + std::to_string(total_delay_seconds) + " 秒确保处理完成");
+                
+                // 在延迟期间继续处理可能到来的结果
+                while (checks_performed < max_checks) {
+                    bool has_activity = false;
+                    
+                    // 线程安全地检查和处理快速识别结果
+                    if (current_recognition_mode == RecognitionMode::FAST_RECOGNITION) {
+                        std::unique_lock<std::mutex> lock(request_mutex, std::try_to_lock);
+                        if (lock.owns_lock()) {
+                            // 调用fastResultReady检查和处理结果
+                            fastResultReady();
+                            
+                            // 检查final_results队列是否还有待处理的结果
+                            RecognitionResult result;
+                            while (final_results && final_results->pop(result, false)) {
+                                has_activity = true;
+                                
+                                if (!result.is_last && !result.text.empty()) {
+                                    if (gui) {
+                                        QMetaObject::invokeMethod(gui, "appendFinalOutput", 
+                                            Qt::QueuedConnection, Q_ARG(QString, QString::fromStdString(result.text)));
+                                        
+                                        LOG_INFO("延迟期间处理识别结果：" + result.text);
+                                    }
+                                    
+                                    // 添加字幕
+                                    if (subtitle_manager) {
+                                        subtitle_manager->addWhisperSubtitle(result);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // 线程安全地检查网络请求状态
+                    {
+                        std::unique_lock<std::mutex> lock(active_requests_mutex, std::try_to_lock);
+                        if (lock.owns_lock() && !active_requests.empty()) {
+                            has_activity = true;
+                            LOG_INFO("延迟期间检测到 " + std::to_string(active_requests.size()) + " 个活跃网络请求");
+                        }
+                    }
+                    
+                    // 检查并行处理器状态（如果正在运行表示可能还有待处理的数据）
+                    if (parallel_processor && current_recognition_mode == RecognitionMode::OPENAI_RECOGNITION) {
+                        has_activity = true;
+                        LOG_INFO("延迟期间检测到OpenAI并行处理器正在运行");
+                    }
+                    
+                    // 线程安全的短暂休眠
+                    std::this_thread::sleep_for(std::chrono::milliseconds(check_interval_ms));
+                    checks_performed++;
+                    
+                    // 每隔1秒记录一次等待状态
+                    if (checks_performed % (1000 / check_interval_ms) == 0) {
+                        int elapsed_seconds = checks_performed * check_interval_ms / 1000;
+                        LOG_INFO("延迟等待进度: " + std::to_string(elapsed_seconds) + "/" + 
+                                std::to_string(total_delay_seconds) + " 秒" + 
+                                (has_activity ? " (检测到活动)" : " (无活动)"));
+                    }
+                }
+                
+                LOG_INFO("延迟等待结束，总共等待了 " + std::to_string(total_delay_seconds) + " 秒");
                 
                 // 结束处理循环
                 break;
@@ -3517,6 +3993,11 @@ void AudioProcessor::processAudio() {
         
         // 确保处理最后一个批次
         if (!current_batch.empty()) {
+            // 使用线程安全的方式处理最后一个批次
+            std::lock_guard<std::mutex> final_batch_lock(request_mutex);
+            
+            LOG_INFO("处理主循环的最后批次: " + std::to_string(current_batch.size()) + " 个缓冲区");
+            
             // 根据当前识别模式处理最后一个批次
             switch (current_recognition_mode) {
                 case RecognitionMode::FAST_RECOGNITION:
@@ -3765,17 +4246,17 @@ void AudioProcessor::fastResultReady() {
         
         // 检查结果文本是否有效
         if (!result.text.empty()) {
-            // 更新GUI
-            if (gui) {
-                QMetaObject::invokeMethod(gui, "appendFinalOutput", 
-                    Qt::QueuedConnection, Q_ARG(QString, QString::fromStdString(result.text)));
-                
+            // 使用安全推送方法，防止重复推送
+            QString resultText = QString::fromStdString(result.text);
+            if (safePushToGUI(resultText, "final", "Fast_Recognition")) {
                 LOG_INFO("快速识别结果已推送到GUI：" + result.text);
-            }
             
             // 添加字幕（如果启用）
             if (subtitle_manager) {
                 subtitle_manager->addWhisperSubtitle(result);
+                }
+            } else {
+                LOG_INFO("快速识别结果未推送（可能是重复）：" + result.text);
             }
         }
     }
@@ -4177,6 +4658,415 @@ void AudioProcessor::processAudioDataByMode(const std::vector<float>& audio_data
             LOG_INFO("Unknown recognition mode: " + std::to_string(static_cast<int>(current_recognition_mode)));
             break;
     }
+}
+
+// 实现防止重复推送到GUI的辅助方法
+std::string AudioProcessor::generateResultHash(const QString& result, const std::string& source_type) {
+    // 使用结果文本和来源类型生成简单的hash
+    std::string combined = result.toStdString() + "|" + source_type;
+    
+    // 使用std::hash生成hash值
+    std::hash<std::string> hasher;
+    size_t hash_value = hasher(combined);
+    
+    // 转换为字符串
+    return std::to_string(hash_value);
+}
+
+bool AudioProcessor::safePushToGUI(const QString& result, const std::string& output_type, const std::string& source_type) {
+    if (!gui || result.isEmpty()) {
+        LOG_INFO("GUI对象为空或结果为空，跳过推送");
+        return false;
+    }
+    
+    // 生成结果的唯一标识符
+    std::string result_hash = generateResultHash(result, source_type);
+    
+    // 检查是否已经推送过这个结果
+    {
+        std::lock_guard<std::mutex> lock(push_cache_mutex);
+        if (pushed_results_cache.find(result_hash) != pushed_results_cache.end()) {
+            LOG_INFO("结果已推送过，跳过重复推送: " + source_type + " - " + result.left(50).toStdString());
+            return false;
+        }
+        
+        // 添加到已推送缓存
+        pushed_results_cache.insert(result_hash);
+        
+        // 限制缓存大小，防止内存泄漏
+        if (pushed_results_cache.size() > 1000) {
+            // 清除一半的缓存
+            auto it = pushed_results_cache.begin();
+            std::advance(it, pushed_results_cache.size() / 2);
+            pushed_results_cache.erase(pushed_results_cache.begin(), it);
+            LOG_INFO("清理推送缓存，保留最近500个结果");
+        }
+    }
+    
+    // 根据输出类型选择推送方法
+    bool success = false;
+    try {
+        if (output_type == "openai") {
+            QMetaObject::invokeMethod(gui, "appendOpenAIOutput", 
+                Qt::QueuedConnection, 
+                Q_ARG(QString, result));
+            LOG_INFO("成功推送OpenAI结果到GUI: " + source_type + " - " + result.left(50).toStdString());
+        } else if (output_type == "final") {
+            QMetaObject::invokeMethod(gui, "appendFinalOutput", 
+                Qt::QueuedConnection, 
+                Q_ARG(QString, result));
+            LOG_INFO("成功推送最终结果到GUI: " + source_type + " - " + result.left(50).toStdString());
+        } else {
+            LOG_ERROR("未知的输出类型: " + output_type);
+            return false;
+        }
+        
+        success = true;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("推送结果到GUI时发生异常: " + std::string(e.what()));
+        
+        // 如果推送失败，从缓存中移除
+        std::lock_guard<std::mutex> lock(push_cache_mutex);
+        pushed_results_cache.erase(result_hash);
+        success = false;
+    }
+    
+    return success;
+}
+
+// 清理推送缓存的方法
+void AudioProcessor::clearPushCache() {
+    std::lock_guard<std::mutex> lock(push_cache_mutex);
+    pushed_results_cache.clear();
+    LOG_INFO("推送缓存已手动清理，新的处理会话开始");
+}
+
+// 静态方法：安全清理所有AudioProcessor实例
+void AudioProcessor::cleanupAllInstances() {
+    LOG_INFO("开始清理所有AudioProcessor实例");
+    
+    std::vector<AudioProcessor*> instances_to_cleanup;
+    
+    // 首先获取所有实例的副本
+    {
+        std::lock_guard<std::mutex> lock(instances_mutex);
+        instances_to_cleanup.reserve(all_instances.size());
+        for (AudioProcessor* instance : all_instances) {
+            instances_to_cleanup.push_back(instance);
+        }
+        LOG_INFO("找到 " + std::to_string(instances_to_cleanup.size()) + " 个AudioProcessor实例需要清理");
+    }
+    
+    // 安全地停止所有实例的处理
+    for (AudioProcessor* instance : instances_to_cleanup) {
+        try {
+            if (instance && instance->is_initialized) {
+                LOG_INFO("停止AudioProcessor实例的处理");
+                instance->stopProcessing();
+                
+                // 给实例一些时间来完成清理
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("清理AudioProcessor实例时发生异常: " + std::string(e.what()));
+        } catch (...) {
+            LOG_ERROR("清理AudioProcessor实例时发生未知异常");
+        }
+    }
+    
+    // 最终检查和报告
+    {
+        std::lock_guard<std::mutex> lock(instances_mutex);
+        if (!all_instances.empty()) {
+            LOG_WARNING("仍有 " + std::to_string(all_instances.size()) + " 个AudioProcessor实例未完全清理");
+        } else {
+            LOG_INFO("所有AudioProcessor实例已成功清理");
+        }
+    }
+}
+
+// 计算动态超时时间（基于文件大小）
+int AudioProcessor::calculateDynamicTimeout(qint64 file_size_bytes) {
+    // 基础超时时间：30秒
+    const int base_timeout = 30000;
+    
+    // 根据文件大小调整超时时间
+    // 假设上传速度为1MB/s，识别处理时间为文件长度的2倍
+    const qint64 bytes_per_second = 1024 * 1024; // 1MB/s
+    const double processing_factor = 2.0; // 处理时间是上传时间的2倍
+    
+    // 计算预估超时时间
+    int estimated_timeout = base_timeout;
+    if (file_size_bytes > 0) {
+        int upload_time = static_cast<int>((file_size_bytes / bytes_per_second) * 1000); // 转换为毫秒
+        int processing_time = static_cast<int>(upload_time * processing_factor);
+        estimated_timeout = std::max(base_timeout, upload_time + processing_time);
+    }
+    
+    // 限制最大超时时间为5分钟
+    const int max_timeout = 5 * 60 * 1000; // 5分钟
+    estimated_timeout = std::min(estimated_timeout, max_timeout);
+    
+    LOG_INFO("文件大小: " + std::to_string(file_size_bytes) + " 字节, 计算超时时间: " + 
+             std::to_string(estimated_timeout) + " 毫秒");
+    
+    return estimated_timeout;
+}
+
+// 判断是否应该重试请求
+bool AudioProcessor::shouldRetryRequest(int request_id, QNetworkReply::NetworkError error) {
+    std::lock_guard<std::mutex> lock(active_requests_mutex);
+    
+    auto it = active_requests.find(request_id);
+    if (it == active_requests.end()) {
+        return false; // 请求信息不存在
+    }
+    
+    const RequestInfo& info = it->second;
+    
+    // 最大重试次数：3次
+    const int max_retries = 3;
+    if (info.retry_count >= max_retries) {
+        LOG_INFO("请求 " + std::to_string(request_id) + " 已达到最大重试次数 " + std::to_string(max_retries));
+        return false;
+    }
+    
+    // 只对某些错误类型进行重试
+    switch (error) {
+        case QNetworkReply::TimeoutError:
+        case QNetworkReply::RemoteHostClosedError:
+        case QNetworkReply::TemporaryNetworkFailureError:
+        case QNetworkReply::NetworkSessionFailedError:
+        case QNetworkReply::UnknownNetworkError:
+            LOG_INFO("请求 " + std::to_string(request_id) + " 遇到可重试错误，准备重试 (第 " + 
+                     std::to_string(info.retry_count + 1) + " 次)");
+            return true;
+            
+        default:
+            LOG_INFO("请求 " + std::to_string(request_id) + " 遇到不可重试错误: " + std::to_string(error));
+            return false;
+    }
+}
+
+// 重试请求
+void AudioProcessor::retryRequest(int request_id) {
+    std::lock_guard<std::mutex> lock(active_requests_mutex);
+    
+    auto it = active_requests.find(request_id);
+    if (it == active_requests.end()) {
+        LOG_ERROR("尝试重试请求 " + std::to_string(request_id) + " 但请求信息不存在");
+        return;
+    }
+    
+    RequestInfo& info = it->second;
+    info.retry_count++;
+    
+    LOG_INFO("开始重试请求 " + std::to_string(request_id) + 
+             " (第 " + std::to_string(info.retry_count) + " 次重试)");
+    
+    // 计算重试延迟（指数退避）
+    int delay_ms = 1000 * std::pow(2, info.retry_count - 1); // 1s, 2s, 4s
+    delay_ms = std::min(delay_ms, 10000); // 最大延迟10秒
+    
+    // 异步延迟重试
+    QTimer::singleShot(delay_ms, this, [this, request_id, info]() {
+        LOG_INFO("执行重试请求 " + std::to_string(request_id));
+        
+        // 重新发送请求
+        if (std::filesystem::exists(info.file_path)) {
+            sendToPreciseServer(info.file_path, info.params);
+        } else {
+            LOG_ERROR("重试时文件不存在: " + info.file_path);
+            
+            // 清理请求信息
+            std::lock_guard<std::mutex> lock(active_requests_mutex);
+            active_requests.erase(request_id);
+        }
+    });
+}
+
+// 安全创建媒体播放器的方法
+void AudioProcessor::createMediaPlayerSafely() {
+    // 如果已经创建，则不重复创建
+    if (media_player && audio_output) {
+        LOG_INFO("媒体播放器已存在，无需重复创建");
+        return;
+    }
+    
+    // 确保在主线程中调用
+    if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+        LOG_WARNING("不在主线程中，延迟到主线程创建媒体播放器");
+        // 使用QMetaObject::invokeMethod在主线程中调用
+        QMetaObject::invokeMethod(this, "createMediaPlayerSafely", Qt::QueuedConnection);
+        return;
+    }
+    
+    LOG_INFO("开始安全创建媒体播放器...");
+    
+    try {
+        // 增强安全检查：确保Qt应用程序和主线程都有效
+        QCoreApplication* app_instance = QCoreApplication::instance();
+        if (!app_instance) {
+            LOG_ERROR("QCoreApplication实例不存在，无法创建媒体播放器");
+            return;
+        }
+        
+        // 清理之前可能存在的对象
+        if (media_player) {
+            disconnect(media_player, nullptr, this, nullptr);
+            media_player->deleteLater();
+            media_player = nullptr;
+        }
+        
+        if (audio_output) {
+            disconnect(audio_output, nullptr, this, nullptr);
+            audio_output->deleteLater();
+            audio_output = nullptr;
+        }
+        
+        // 创建QMediaPlayer
+        try {
+            media_player = new QMediaPlayer(this);  // 现在可以安全地设置父对象
+            LOG_INFO("QMediaPlayer创建成功");
+        } catch (const std::exception& e) {
+            LOG_ERROR("QMediaPlayer创建失败: " + std::string(e.what()));
+            return;
+        } catch (...) {
+            LOG_ERROR("QMediaPlayer创建失败: 未知异常");
+            return;
+        }
+        
+        // 创建QAudioOutput
+        try {
+            audio_output = new QAudioOutput(this);  // 现在可以安全地设置父对象
+            LOG_INFO("QAudioOutput创建成功");
+        } catch (const std::exception& e) {
+            LOG_ERROR("QAudioOutput创建失败: " + std::string(e.what()));
+            // 清理已创建的QMediaPlayer
+            if (media_player) {
+                media_player->deleteLater();
+                media_player = nullptr;
+            }
+            return;
+        } catch (...) {
+            LOG_ERROR("QAudioOutput创建失败: 未知异常");
+            // 清理已创建的QMediaPlayer
+            if (media_player) {
+                media_player->deleteLater();
+                media_player = nullptr;
+            }
+            return;
+        }
+        
+        // 连接媒体播放器和音频输出
+        try {
+            media_player->setAudioOutput(audio_output);
+            
+            // 连接媒体播放器信号
+            connectMediaPlayerSignals();
+            
+            LOG_INFO("媒体播放器安全创建并初始化成功");
+            
+            if (gui) {
+                QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                    Qt::QueuedConnection, 
+                    Q_ARG(QString, QString("媒体播放器已成功初始化")));
+            }
+            
+        } catch (const std::exception& e) {
+            LOG_ERROR("连接媒体播放器和音频输出失败: " + std::string(e.what()));
+            // 清理所有对象
+            if (media_player) {
+                media_player->deleteLater();
+                media_player = nullptr;
+            }
+            if (audio_output) {
+                audio_output->deleteLater();
+                audio_output = nullptr;
+            }
+        }
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("安全创建媒体播放器失败: " + std::string(e.what()));
+        // 确保清理状态
+        media_player = nullptr;
+        audio_output = nullptr;
+    } catch (...) {
+        LOG_ERROR("安全创建媒体播放器失败: 未知异常");
+        // 确保清理状态
+        media_player = nullptr;
+        audio_output = nullptr;
+    }
+}
+
+// 延迟初始化VAD实例（在Qt multimedia完全初始化后调用）
+bool AudioProcessor::initializeVADSafely() {
+    LOG_INFO("开始安全初始化VAD实例...");
+    
+    try {
+        // 检查是否已经初始化
+        if (voice_detector && voice_detector->isVADInitialized()) {
+            LOG_INFO("VAD已经初始化，跳过重复初始化");
+            return true;
+        }
+        
+        // 在Qt multimedia完全初始化后，现在可以安全地创建VAD
+        LOG_INFO("Qt multimedia已就绪，开始创建VAD实例");
+        
+        // 检查VAD库状态
+        if (!VoiceActivityDetector::checkVADLibraryState()) {
+            LOG_ERROR("VAD库状态检查失败，无法初始化");
+            return false;
+        }
+        
+        // 创建VoiceActivityDetector实例
+        try {
+            voice_detector = std::make_unique<VoiceActivityDetector>(vad_threshold);
+            if (!voice_detector) {
+                LOG_ERROR("VoiceActivityDetector创建失败");
+                return false;
+            }
+            
+            // 验证VAD是否真正初始化成功
+            if (!voice_detector->isVADInitialized()) {
+                LOG_ERROR("VoiceActivityDetector创建成功但VAD核心未初始化");
+                voice_detector.reset();
+                return false;
+            }
+            
+            LOG_INFO("VoiceActivityDetector创建成功");
+            
+            // 配置VAD参数
+            voice_detector->setVADMode(3);  // 使用最敏感模式
+            voice_detector->setThreshold(vad_threshold);
+            
+            LOG_INFO("VAD参数配置完成");
+            
+        } catch (const std::exception& e) {
+            LOG_ERROR("创建VoiceActivityDetector时发生异常: " + std::string(e.what()));
+            return false;
+        } catch (...) {
+            LOG_ERROR("创建VoiceActivityDetector时发生未知异常");
+            return false;
+        }
+        
+        LOG_INFO("VAD实例安全初始化完成");
+        return true;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("VAD安全初始化异常: " + std::string(e.what()));
+        return false;
+        
+    } catch (...) {
+        LOG_ERROR("VAD安全初始化未知异常");
+        return false;
+    }
+}
+
+// 检查VAD是否已初始化
+bool AudioProcessor::isVADInitialized() const {
+    return voice_detector && voice_detector->isVADInitialized();
 }
 
 

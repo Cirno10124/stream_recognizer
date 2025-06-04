@@ -159,40 +159,40 @@ public:
                            int channels = 1,
                            int bitsPerSample = 16) {
         try {
-            if (buffers.empty()) {
-                std::cerr << "没有音频数据可保存" << std::endl;
-                return false;
-            }
+        if (buffers.empty()) {
+            std::cerr << "没有音频数据可保存" << std::endl;
+            return false;
+        }
 
-            // 计算所有缓冲区的总大小
-            size_t totalSamples = 0;
-            for (const auto& buffer : buffers) {
-                totalSamples += buffer.data.size();
-            }
+        // 计算所有缓冲区的总大小
+        size_t totalSamples = 0;
+        for (const auto& buffer : buffers) {
+            totalSamples += buffer.data.size();
+        }
             
             if (totalSamples == 0) {
                 std::cerr << "所有音频缓冲区都为空" << std::endl;
                 return false;
             }
-            
-            // 创建一个临时的组合缓冲区
-            std::vector<float> combinedData;
-            combinedData.reserve(totalSamples);
-            
-            // 合并所有音频数据
-            for (const auto& buffer : buffers) {
+        
+        // 创建一个临时的组合缓冲区
+        std::vector<float> combinedData;
+        combinedData.reserve(totalSamples);
+        
+        // 合并所有音频数据
+        for (const auto& buffer : buffers) {
                 if (!buffer.data.empty()) {
-                    combinedData.insert(combinedData.end(), buffer.data.begin(), buffer.data.end());
+            combinedData.insert(combinedData.end(), buffer.data.begin(), buffer.data.end());
                 }
             }
             
             if (combinedData.empty()) {
                 std::cerr << "合并后的音频数据为空" << std::endl;
                 return false;
-            }
-            
-            // 使用现有的saveWavFile方法保存合并后的数据
-            return saveWavFile(filename, combinedData, sampleRate, channels, bitsPerSample);
+        }
+        
+        // 使用现有的saveWavFile方法保存合并后的数据
+        return saveWavFile(filename, combinedData, sampleRate, channels, bitsPerSample);
             
         } catch (const std::exception& e) {
             std::cerr << "保存WAV批次时发生异常: " << e.what() << std::endl;

@@ -8,7 +8,7 @@
         "step_ms": 3000
     },
     "models": {
-        "fast_model": "models/ggml-base.bin",
+        "fast_model": "models/ggml-medium.bin",
         "precise_model": "models/ggml-large-v3-turbo.bin",
         "translate_model": "models/ggml-base.bin"
     },

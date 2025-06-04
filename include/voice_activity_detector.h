@@ -105,6 +105,15 @@ public:
     
     // 更新语音活动状态，返回是否为静音
     bool updateVoiceState(bool is_silence);
+    
+    // 静态方法：检查VAD库状态
+    static bool checkVADLibraryState();
+    
+    // 安全创建VAD实例的静态方法
+    static Fvad* safeCreateVADInstance();
+    
+    // 检查VAD实例是否已正确初始化
+    bool isVADInitialized() const;
 
 private:
     // VAD阈值，值越大检测越严格
@@ -136,6 +145,9 @@ private:
     
     int vad_mode;                 // WebRTC VAD模式 (0-3)
     Fvad* vad_instance;           // WebRTC VAD实例
+    
+    // 音频转换缓冲区 - 线程安全的实例变量
+    std::vector<int16_t> int16_buffer;
     
     // 连续静音检测相关变量
     std::deque<bool> silence_history;   // 最近帧的静音历史

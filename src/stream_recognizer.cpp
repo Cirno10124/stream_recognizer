@@ -14,6 +14,9 @@
 #include <exception>
 #include <signal.h>
 #include <QTimer>
+#include <QMediaPlayer>
+#include <QAudioOutput>
+#include <QThread>
 
 // 全局变量定义
 bool g_use_gpu = true;
@@ -21,6 +24,14 @@ bool g_use_gpu = true;
 // 信号处理函数，用于捕获崩溃
 void signalHandler(int signal) {
     std::cerr << "捕获到信号: " << signal << std::endl;
+    
+    // 尝试清理所有AudioProcessor实例
+    try {
+        AudioProcessor::cleanupAllInstances();
+        std::cerr << "资源清理完成" << std::endl;
+    } catch (...) {
+        std::cerr << "清理资源时发生异常" << std::endl;
+    }
     
     // 如果是非法指令错误，可能是CUDA相关问题
     if (signal == SIGILL) {
@@ -58,6 +69,25 @@ int main(int argc, char* argv[]) {
     QFont font("Microsoft YaHei", 9);  // 使用微软雅黑字体
     app.setFont(font);
     
+    // 预初始化Qt multimedia，确保FFmpeg库完全初始化
+    LOG_INFO("开始预初始化Qt multimedia...");
+    {
+        // 创建临时的多媒体对象来触发Qt multimedia初始化
+        QScopedPointer<QMediaPlayer> temp_player(new QMediaPlayer());
+        QScopedPointer<QAudioOutput> temp_output(new QAudioOutput());
+        
+        // 连接它们以确保内部初始化完成
+        temp_player->setAudioOutput(temp_output.get());
+        
+        // 处理Qt事件循环，确保初始化完成
+        app.processEvents();
+        
+        // 等待一小段时间确保所有后台初始化完成
+        QThread::msleep(200);
+        
+        LOG_INFO("Qt multimedia预初始化完成");
+    }
+    
     // 加载配置
     auto& config = ConfigManager::getInstance();
     if (!config.loadConfig("config.json")) {
@@ -80,6 +110,21 @@ int main(int argc, char* argv[]) {
     
     // 然后创建音频处理器，并传入GUI指针
     std::unique_ptr<AudioProcessor> processor = std::make_unique<AudioProcessor>(gui.get());
+    
+    // 在Qt multimedia初始化完成后，安全初始化VAD
+    LOG_INFO("开始安全初始化VAD实例...");
+    if (!processor->initializeVADSafely()) {
+        LOG_WARNING("VAD初始化失败，将使用基础音频处理功能");
+        // 不直接退出，允许程序在没有VAD的情况下运行
+        if (gui) {
+            gui->appendLogMessage("警告：VAD初始化失败，部分功能可能受限");
+        }
+    } else {
+        LOG_INFO("VAD初始化成功");
+        if (gui) {
+            gui->appendLogMessage("VAD语音检测器初始化成功");
+        }
+    }
     
     // 预加载模型 - 从配置文件获取模型路径
     bool success = processor->preloadModels(
@@ -153,14 +198,45 @@ int main(int argc, char* argv[]) {
     // 运行Qt事件循环
     int result = app.exec();
     
-    // 在程序退出前，确保正确的析构顺序
-    // 先析构AudioProcessor，再析构GUI
-    processor.reset();
-    gui.reset();
+    LOG_INFO("Qt事件循环已退出，开始清理资源");
     
+    // 在程序退出前，先清理所有AudioProcessor实例
+    try {
+        AudioProcessor::cleanupAllInstances();
+        LOG_INFO("所有AudioProcessor实例清理完成");
+    } catch (const std::exception& e) {
+        LOG_ERROR("清理AudioProcessor实例时发生异常: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("清理AudioProcessor实例时发生未知异常");
+    }
+    
+    // 然后按正确的析构顺序清理对象
+    // 先析构AudioProcessor，再析构GUI
+    try {
+        LOG_INFO("开始析构AudioProcessor");
+        processor.reset();
+        LOG_INFO("AudioProcessor析构完成");
+        
+        LOG_INFO("开始析构GUI");
+        gui.reset();
+        LOG_INFO("GUI析构完成");
+    } catch (const std::exception& e) {
+        LOG_ERROR("析构对象时发生异常: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("析构对象时发生未知异常");
+    }
+    
+    LOG_INFO("程序正常退出，返回码: " + std::to_string(result));
     return result;
     } catch (const std::exception& e) {
         std::cerr << "主函数捕获到异常: " << e.what() << std::endl;
+        
+        // 尝试清理资源
+        try {
+            AudioProcessor::cleanupAllInstances();
+        } catch (...) {
+            std::cerr << "清理资源时发生异常" << std::endl;
+        }
         
         // 检查是否是CUDA相关错误
         std::string error = e.what();
@@ -185,6 +261,14 @@ int main(int argc, char* argv[]) {
         return 1;
     } catch (...) {
         std::cerr << "主函数捕获到未知异常" << std::endl;
+        
+        // 尝试清理资源
+        try {
+            AudioProcessor::cleanupAllInstances();
+        } catch (...) {
+            std::cerr << "清理资源时发生异常" << std::endl;
+        }
+        
         QMessageBox::critical(nullptr, "严重错误", "程序启动时发生未知错误");
         return 1;
     }

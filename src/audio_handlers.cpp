@@ -224,27 +224,27 @@ void FileAudioInput::processFile() {
             
             for (size_t batch_start = 0; batch_start < totalSamples; batch_start += CONVERSION_BATCH_SIZE) {
                 size_t batch_end = std::min(batch_start + CONVERSION_BATCH_SIZE, totalSamples);
-                
-                // 转换为浮点数，支持不同位深度
-                if (bitsPerSample == 16) {
-                    const int16_t* samples = reinterpret_cast<const int16_t*>(buffer.data());
+            
+            // 转换为浮点数，支持不同位深度
+            if (bitsPerSample == 16) {
+                const int16_t* samples = reinterpret_cast<const int16_t*>(buffer.data());
                     for (size_t i = batch_start; i < batch_end; ++i) {
-                        audioData[i] = samples[i] / 32768.0f;
-                    }
-                } else if (bitsPerSample == 32) {
-                    const int32_t* samples = reinterpret_cast<const int32_t*>(buffer.data());
+                    audioData[i] = samples[i] / 32768.0f;
+                }
+            } else if (bitsPerSample == 32) {
+                const int32_t* samples = reinterpret_cast<const int32_t*>(buffer.data());
                     for (size_t i = batch_start; i < batch_end; ++i) {
-                        audioData[i] = samples[i] / 2147483648.0f;
-                    }
-                } else if (bitsPerSample == 8) {
-                    const uint8_t* samples = reinterpret_cast<const uint8_t*>(buffer.data());
+                    audioData[i] = samples[i] / 2147483648.0f;
+                }
+            } else if (bitsPerSample == 8) {
+                const uint8_t* samples = reinterpret_cast<const uint8_t*>(buffer.data());
                     for (size_t i = batch_start; i < batch_end; ++i) {
-                        audioData[i] = (samples[i] - 128) / 128.0f;
-                    }
-                } else {
-                    LOG_ERROR("Unsupported bits per sample: " + std::to_string(bitsPerSample));
-                    is_running = false;
-                    return;
+                    audioData[i] = (samples[i] - 128) / 128.0f;
+                }
+            } else {
+                LOG_ERROR("Unsupported bits per sample: " + std::to_string(bitsPerSample));
+                is_running = false;
+                return;
                 }
                 
                 // 在每个批次之间稍作停顿，避免CPU过载

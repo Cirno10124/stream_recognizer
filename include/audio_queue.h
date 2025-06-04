@@ -15,6 +15,7 @@ public:
     bool is_terminated() const;
     void terminate();
     void reset();
+    bool empty() { return queue.empty(); };
     
 private:
     std::queue<AudioBuffer> queue;
@@ -31,7 +32,7 @@ public:
     bool is_terminated() const;
     void terminate();
     void reset();
-    
+	bool empty() const { return queue.empty(); }
     // 为改进的消费者模式提供以下辅助方法
     std::mutex& getMutex() { return mutex; }
     std::condition_variable& getCondition() { return condition; }
