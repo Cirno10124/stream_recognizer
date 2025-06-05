@@ -26,6 +26,7 @@ public:
     // 基本控制
     bool start();
     void stop();
+    void reset();  // 重置到初始状态，准备下次使用
     
     // 实时分段支持
     void enableRealtimeSegmentation(bool enable, 

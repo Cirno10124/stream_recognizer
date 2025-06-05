@@ -248,6 +248,9 @@ public:
     // 检查VAD是否已初始化
     bool isVADInitialized() const;
     
+    // 重置AudioProcessor状态以准备重新启动
+    void resetForRestart();
+    
 public slots:
     // 从ResultMerger接收结果
     void openAIResultReady(const QString& result);

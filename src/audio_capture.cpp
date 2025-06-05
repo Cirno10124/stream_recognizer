@@ -156,6 +156,30 @@ void AudioCapture::stop() {
     }
 }
 
+void AudioCapture::reset() {
+    LOG_INFO("Resetting AudioCapture to initial state");
+    
+    // 确保先停止
+    if (running) {
+        stop();
+    }
+    
+    // 重置所有状态变量到初始状态
+    running = false;
+    
+    // 重置分段相关状态
+    if (segment_handler) {
+        segment_handler->stop();
+        segment_handler.reset();
+    }
+    segmentation_enabled = false;
+    segment_size_ms = 5000;  // 重置为默认值
+    segment_overlap_ms = 500;  // 重置为默认值
+    segment_callback = nullptr;
+    
+    LOG_INFO("AudioCapture reset completed - ready for next use");
+}
+
 void AudioCapture::enableRealtimeSegmentation(bool enable, size_t segment_size_ms, size_t overlap_ms) {
     // 保存设置
     segmentation_enabled = enable;

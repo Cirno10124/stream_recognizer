@@ -808,15 +808,30 @@ void AudioProcessor::startProcessing() {
         // 重置自适应VAD，开始新的能量收集
         resetAdaptiveVAD();
         
-        // 在处理之前确保准备好音频队列和结果队列
+        // 确保音频队列和结果队列已准备好（重用现有实例或创建新实例）
         if (!audio_queue) {
             audio_queue = std::make_unique<AudioQueue>();
+            LOG_INFO("Created new audio queue");
+        } else {
+            // 确保队列已重置并准备好使用
+            audio_queue->reset();
+            LOG_INFO("Reusing existing audio queue");
         }
+        
         if (!fast_results) {
             fast_results = std::make_unique<ResultQueue>();
+            LOG_INFO("Created new fast results queue");
+        } else {
+            fast_results->reset();
+            LOG_INFO("Reusing existing fast results queue");
         }
+        
         if (!final_results) {
             final_results = std::make_unique<ResultQueue>();
+            LOG_INFO("Created new final results queue");
+        } else {
+            final_results->reset();
+            LOG_INFO("Reusing existing final results queue");
         }
         
         LOG_INFO("Starting audio processing in mode: " + std::to_string(static_cast<int>(current_recognition_mode)));
@@ -828,43 +843,52 @@ void AudioProcessor::startProcessing() {
                 if (gui) {
                     logMessage(gui, "Starting microphone recording...");
                 }
+                
+                // 重用现有AudioCapture实例或创建新实例
                 if (!audio_capture) {
                     audio_capture = std::make_unique<AudioCapture>(audio_queue.get());
-                    
-                    // 设置麦克风分段功能
-                    if (use_realtime_segments && 
-                        (current_recognition_mode == RecognitionMode::OPENAI_RECOGNITION ||
-                         current_recognition_mode == RecognitionMode::PRECISE_RECOGNITION)) {
-                        audio_capture->enableRealtimeSegmentation(true, segment_size_ms, segment_overlap_ms);
-                        audio_capture->setSegmentCallback([this](const std::string& filepath) {
-                            // 处理麦克风捕获的音频段
-                            if (gui) {
-                                gui->appendLogMessage("Processing captured audio segment: " + QString::fromStdString(filepath));
-                            }
-                            
-                            // 根据识别模式处理段
-                            if (current_recognition_mode == RecognitionMode::OPENAI_RECOGNITION) {
-                            // 调用OpenAI API处理
-                            processWithOpenAI(filepath);
-                            } else if (current_recognition_mode == RecognitionMode::PRECISE_RECOGNITION) {
-                                // 发送到精确识别服务
-                                RecognitionParams params;
-                                params.language = current_language;
-                                params.use_gpu = use_gpu;
-                                sendToPreciseServer(filepath, params);
-                            }
-                        });
-                        
+                    LOG_INFO("Created new audio capture instance");
+                } else {
+                    // 确保AudioCapture实例已重置并准备使用
+                    audio_capture->reset();
+                    LOG_INFO("Reusing existing audio capture instance");
+                }
+                
+                // 设置麦克风分段功能
+                if (use_realtime_segments && 
+                    (current_recognition_mode == RecognitionMode::OPENAI_RECOGNITION ||
+                     current_recognition_mode == RecognitionMode::PRECISE_RECOGNITION)) {
+                    audio_capture->enableRealtimeSegmentation(true, segment_size_ms, segment_overlap_ms);
+                    audio_capture->setSegmentCallback([this](const std::string& filepath) {
+                        // 处理麦克风捕获的音频段
                         if (gui) {
-                            logMessage(gui, std::string("Realtime segmentation processor started: segment size=") +
-                                std::to_string(segment_size_ms) + "ms, overlap=" +
-                                std::to_string(segment_overlap_ms) + "ms");
+                            gui->appendLogMessage("Processing captured audio segment: " + QString::fromStdString(filepath));
                         }
+                        
+                        // 根据识别模式处理段
+                        if (current_recognition_mode == RecognitionMode::OPENAI_RECOGNITION) {
+                        // 调用OpenAI API处理
+                        processWithOpenAI(filepath);
+                        } else if (current_recognition_mode == RecognitionMode::PRECISE_RECOGNITION) {
+                            // 发送到精确识别服务
+                            RecognitionParams params;
+                            params.language = current_language;
+                            params.use_gpu = use_gpu;
+                            sendToPreciseServer(filepath, params);
+                        }
+                    });
+                    
+                    if (gui) {
+                        logMessage(gui, std::string("Realtime segmentation processor started: segment size=") +
+                            std::to_string(segment_size_ms) + "ms, overlap=" +
+                            std::to_string(segment_overlap_ms) + "ms");
                     }
                 }
+                
                 if (!audio_capture->start()) {
                     throw std::runtime_error("Failed to start microphone recording");
                 }
+                LOG_INFO("Microphone recording started successfully");
                 break;
                 
             case InputMode::AUDIO_FILE:
@@ -882,13 +906,15 @@ void AudioProcessor::startProcessing() {
                     throw std::runtime_error("Audio file does not exist: " + current_file_path);
                 }
                 
-                // 初始化文件输入源
+                // 重用现有文件输入源或创建新实例
                 if (!file_input) {
                     // 将fast_mode传递给文件输入源，控制读取方式
                     file_input = std::make_unique<FileAudioInput>(audio_queue.get(), fast_mode);
+                    LOG_INFO("Created new file input instance");
                 } else {
                     // 确保使用最新的快速模式设置
                     file_input->setFastMode(fast_mode);
+                    LOG_INFO("Reusing existing file input instance");
                 }
                 
                 // 为文件输入启用实时分段处理（如果需要）
@@ -927,13 +953,15 @@ void AudioProcessor::startProcessing() {
                     throw std::runtime_error("No extracted audio file available for video");
                 }
                 
-                // 初始化文件输入源，使用提取的音频文件路径
+                // 重用现有文件输入源或创建新实例（用于视频音频）
                 if (!file_input) {
                     // 将fast_mode传递给文件输入源，控制读取方式
                     file_input = std::make_unique<FileAudioInput>(audio_queue.get(), fast_mode);
+                    LOG_INFO("Created new file input instance for video audio");
                 } else {
                     // 确保使用最新的快速模式设置
                     file_input->setFastMode(fast_mode);
+                    LOG_INFO("Reusing existing file input instance for video audio");
                 }
                 
                 // 为视频文件输入启用实时分段处理（如果需要）
@@ -1345,21 +1373,10 @@ void AudioProcessor::stopMediaPlayback() {
             // 然后停止播放
             media_player->stop();
             
-            // 断开所有信号连接，避免处理旧事件
-            QObject::disconnect(media_player, nullptr, this, nullptr);
-            
-            // 清除媒体源以释放资源
+            // 清除媒体源以释放资源，但保持媒体播放器对象
             media_player->setSource(QUrl());
             
-            // 如果有视频组件，断开连接并清理
-            if (video_widget && video_widget->videoSink()) {
-                try {
-                    media_player->setVideoSink(nullptr);
-                    LOG_INFO("视频接收器已从媒体播放器断开");
-                } catch (const std::exception& e) {
-                    LOG_ERROR("断开视频接收器时出错: " + std::string(e.what()));
-                }
-            }
+            LOG_INFO("Media player stopped and source cleared");
         }
         
         if (gui) {
@@ -3712,29 +3729,36 @@ void AudioProcessor::stopProcessing() {
         return;
     }
     
-    LOG_INFO("Stopping audio processing");
+    LOG_INFO("Stopping audio processing - preparing for restart capability");
     is_processing = false;
     
     try {
-        // 首先停止媒体播放
-        stopMediaPlayback();
+        // 首先停止媒体播放，但保持播放器组件
+        if (media_player && media_player->playbackState() != QMediaPlayer::StoppedState) {
+            media_player->stop();
+            LOG_INFO("Media playback stopped");
+        }
         
-        // 停止所有输入源
+        // 停止所有输入源，但不销毁组件
         if (gui) {
-            logMessage(gui, "Stopping all input sources...");
+            logMessage(gui, "Stopping input sources...");
         }
         
         if (audio_capture) {
             audio_capture->stop();
+            // 重置AudioCapture状态，准备下次使用
+            audio_capture->reset();
+            LOG_INFO("Audio capture stopped and reset");
         }
         
         if (file_input) {
             file_input->stop();
+            LOG_INFO("File input stopped");
         }
         
-        // 停止所有处理组件，但不销毁它们
+        // 停止所有处理组件，但保持组件实例
         if (gui) {
-            logMessage(gui, "Stopping all processing components...");
+            logMessage(gui, "Stopping processing components...");
         }
         
         // 根据当前识别模式停止对应组件
@@ -3747,9 +3771,15 @@ void AudioProcessor::stopProcessing() {
                 break;
                 
             case RecognitionMode::PRECISE_RECOGNITION:
-                // 精确识别服务使用HTTP请求，不需要专门停止
-                // 但可以清理请求队列或设置标志位
-                LOG_INFO("Precise recognition service disconnected");
+                // 精确识别服务：取消活跃请求，但保持网络管理器
+                {
+                    std::lock_guard<std::mutex> lock(active_requests_mutex);
+                    if (!active_requests.empty()) {
+                        LOG_INFO("Canceling " + std::to_string(active_requests.size()) + " active precise recognition requests");
+                        active_requests.clear();
+                    }
+                }
+                LOG_INFO("Precise recognition service stopped");
                 break;
                 
             case RecognitionMode::OPENAI_RECOGNITION:
@@ -3760,59 +3790,57 @@ void AudioProcessor::stopProcessing() {
                 break;
         }
         
-        // 停止分段处理器
+        // 停止分段处理器，但保持实例
         if (segment_handler) {
             segment_handler->stop();
             LOG_INFO("Segment handler stopped");
         }
         
-        // 终止所有队列，但保持队列对象存在
+        // 清理队列内容，但保持队列对象完整
         if (audio_queue) {
             audio_queue->terminate();
-            // 重置队列状态以便重新使用
             audio_queue->reset();
+            LOG_INFO("Audio queue cleaned and reset");
         }
         
         if (fast_results) {
             fast_results->terminate();
             fast_results->reset();
+            LOG_INFO("Fast results queue cleaned and reset");
         }
         
         if (final_results) {
             final_results->terminate();
             final_results->reset();
+            LOG_INFO("Final results queue cleaned and reset");
         }
         
-        // 等待处理线程结束
-        // 单线程模式：不需要等待处理线程
-        // if (process_thread.joinable()) {
-        //     if (gui) {
-        //         logMessage(gui, "Waiting for processing thread to finish...");
-        //     }
-        //     
-        //     // 设置超时，避免永久等待
-        //     auto timeout = std::chrono::system_clock::now() + std::chrono::seconds(5);
-        //     
-        //     std::thread([this, timeout]() {
-        //         while (process_thread.joinable()) {
-        //             if (std::chrono::system_clock::now() > timeout) {
-        //                 LOG_WARNING("Processing thread join timeout, may cause resource leaks");
-        //                 break;
-        //             }
-        //             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        //         }
-        //     }).detach();
-        //     
-        //     process_thread.join();
-        // }
+        // 清理推送缓存，准备下次使用
+        clearPushCache();
+        
+        // 重置处理状态变量
+        is_paused = false;
+        
+        // 清理待处理的音频数据
+        pending_audio_data.clear();
+        pending_audio_samples = 0;
+        
+        // 确保网络管理器准备就绪
+        if (!precise_network_manager) {
+            precise_network_manager = new QNetworkAccessManager(this);
+            LOG_INFO("Recreated network access manager");
+        }
+        
+        LOG_INFO("Audio processing stopped - system ready for restart");
         
         if (gui) {
-            logMessage(gui, "Audio processing system stopped");
+            logMessage(gui, "Audio processing stopped - ready for next session");
         }
         
         // 发送处理完全停止的信号
         emit processingFullyStopped();
-        LOG_INFO("发送processingFullyStopped信号");
+        LOG_INFO("Processing fully stopped signal sent");
+        
     } catch (const std::exception& e) {
         LOG_ERROR("Error stopping processing: " + std::string(e.what()));
         if (gui) {
@@ -5189,6 +5217,44 @@ void AudioProcessor::startFinalSegmentDelayProcessing() {
     
     // 分离线程，让它在后台执行
     delay_thread.detach();
+}
+
+// 重置AudioProcessor状态以准备重新启动（仅在需要时调用，通常不需要单独调用）
+void AudioProcessor::resetForRestart() {
+    LOG_INFO("Performing additional reset for restart");
+    
+    try {
+        // 确保所有关键组件都处于正确的初始状态
+        
+        // 重置自适应VAD状态
+        if (voice_detector) {
+            resetAdaptiveVAD();
+            LOG_INFO("VAD state reset while preserving instance");
+        }
+        
+        // 确保媒体播放器处于正确状态
+        if (media_player) {
+            media_player->setPosition(0);
+            LOG_INFO("Media player position reset");
+        }
+        
+        // 确保所有核心组件都已连接信号
+        if (media_player && !QObject::receivers(SIGNAL(positionChanged(qint64)))) {
+            connectMediaPlayerSignals();
+            LOG_INFO("Media player signals reconnected");
+        }
+        
+        // 重新初始化VAD如果需要
+        if (!voice_detector || !voice_detector->isVADInitialized()) {
+            initializeVADSafely();
+            LOG_INFO("VAD reinitialized for restart");
+        }
+        
+        LOG_INFO("Additional reset for restart completed");
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("Error during additional reset for restart: " + std::string(e.what()));
+    }
 }
 
 

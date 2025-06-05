@@ -60,11 +60,9 @@ public:
     // QVideoWidget* getVideoWidget() { return videoWidget; }
 
 public slots:
-    void appendRealTimeOutput(const QString& text);
     void appendFinalOutput(const QString& text);
     void appendLogMessage(const QString& message);
     void appendErrorMessage(const QString& error);
-    void appendOpenAIOutput(const QString& text);
     void onOpenAIResultReady(const QString& result);
     void handleOpenAIError(const QString& error);
     void checkOpenAIAPIConnection();
@@ -96,13 +94,8 @@ public slots:
     void selectInputFile();
     void processFile(const QString& filePath);
     void onUseOpenAIChanged(int state);
-    void onUseRealtimeSegmentsChanged(int state);
-    void onSegmentSizeChanged(int value);
-    void onSegmentOverlapChanged(int value);
-    void updateRealtimeSegmentControls();
     void onEnableSubtitlesChanged(int state);
     void onSubtitlePositionChanged(int index);
-    void onSubtitleSourceChanged(int index);
     void onDualSubtitlesChanged(int state);
     void onExportSubtitles();
     void onSubtitleTextChanged(const QString& text);
@@ -121,6 +114,9 @@ public slots:
     QVideoWidget* getVideoWidget() { return videoWidget; }
 
 private:
+    // 静态成员用于管理配置对话框，防止重复创建和内存泄漏
+    static QDialog* s_settingsDialog;
+    
     void setupUI();
     void setupConnections();
     void setupBetterFont();
@@ -143,31 +139,18 @@ private:
     QComboBox* targetLanguageCombo;
     QCheckBox* dualLanguageCheck;
     QCheckBox* fastModeCheck;
-    QCheckBox* useOpenAICheck;
     QComboBox* recognitionModeCombo;
-    QTextEdit* realTimeOutput;
     QTextEdit* finalOutput;
     QTextEdit* logOutput;
-    QTextEdit* openaiOutput;
-    
-    // OpenAI相关UI元素
-    QLabel* apiUrlLabel;
-    QLabel* modelLabel;
     
     // 字幕相关UI元素
     QLabel* subtitleLabel;
     QCheckBox* enableSubtitlesCheckBox;
     QComboBox* subtitlePositionComboBox;
-    QComboBox* subtitleSourceComboBox;
     QCheckBox* dualSubtitlesCheckBox;
     QPushButton* exportSubtitlesButton;
     
-    // 实时分段设置UI元素
-    QCheckBox* useRealtimeSegmentsCheck;
-    QLabel* segmentSizeLabel;
-    QSpinBox* segmentSizeSpinBox;
-    QLabel* segmentOverlapLabel;
-    QSpinBox* segmentOverlapSpinBox;
+
     
     // 媒体控制
     QMediaPlayer* mediaPlayer;

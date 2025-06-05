@@ -40,14 +40,15 @@
 //#include <consoleapi2.h>
 //#include <WinNls.h>
 
+// 初始化静态成员变量
+QDialog* WhisperGUI::s_settingsDialog = nullptr;
+
 WhisperGUI::WhisperGUI(QWidget* parent)
     : QMainWindow(parent), 
       isRecording(false),
       isPlaying(false),
       logOutput(nullptr),
-      realTimeOutput(nullptr),
       finalOutput(nullptr),
-      openaiOutput(nullptr),
       currentFilePath(""),
       mediaPlayer(nullptr),
       audioOutput(nullptr),
@@ -108,9 +109,8 @@ void WhisperGUI::safeInitialize() {
                 subtitlePositionComboBox->currentIndex() == 0 ? 
                 SubtitlePosition::Top : SubtitlePosition::Bottom);
                 
-            subtitleManager->setSubtitleSource(
-                subtitleSourceComboBox->currentIndex() == 0 ? 
-                SubtitleSource::Whisper : SubtitleSource::OpenAI);
+            // 默认使用Whisper作为字幕源（已移除字幕源选择）
+            subtitleManager->setSubtitleSource(SubtitleSource::Whisper);
             
             // 设置双语模式
             subtitleManager->setDualSubtitles(dualSubtitlesCheckBox->isChecked());
@@ -163,15 +163,6 @@ void WhisperGUI::setupBetterFont() {
         // 使用安全的延迟调用来设置UI元素的样式
         QMetaObject::invokeMethod(this, [this]() {
             // 为文本输出区域设置样式，提高可读性
-            if (realTimeOutput && realTimeOutput->document()) {
-                try {
-                    realTimeOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
-                    realTimeOutput->setFont(QGuiApplication::font());
-                } catch (const std::exception& e) {
-                    qCritical() << "Error setting realTimeOutput style:" << e.what();
-                }
-            }
-            
             if (finalOutput && finalOutput->document()) {
                 try {
                     finalOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
@@ -190,15 +181,6 @@ void WhisperGUI::setupBetterFont() {
                 }
             }
             
-            if (openaiOutput && openaiOutput->document()) {
-                try {
-                    openaiOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
-                    openaiOutput->setFont(QGuiApplication::font());
-                } catch (const std::exception& e) {
-                    qCritical() << "Error setting openaiOutput style:" << e.what();
-                }
-            }
-            
             qDebug() << "Font setup completed";
         }, Qt::QueuedConnection);
     }
@@ -211,6 +193,12 @@ void WhisperGUI::setupBetterFont() {
 }
 
 WhisperGUI::~WhisperGUI() {
+    // 清理配置对话框
+    if (s_settingsDialog) {
+        s_settingsDialog->deleteLater();
+        s_settingsDialog = nullptr;
+    }
+    
     cleanupMediaPlayer();
     delete audioProcessor;
 }
@@ -251,7 +239,6 @@ void WhisperGUI::setupUI() {
     targetLanguageCombo = new QComboBox(this);
     dualLanguageCheck = new QCheckBox("Dual Language Output", this);
     fastModeCheck = new QCheckBox("Fast Mode", this);
-    useOpenAICheck = new QCheckBox("Use OpenAI API", this);
     
     // 添加识别模式选择下拉框
     QLabel* recognitionModeLabel = new QLabel("Recognition Mode:", this);
@@ -265,23 +252,9 @@ void WhisperGUI::setupUI() {
     QPushButton* settingsButton = new QPushButton("Advanced Settings", this);
     connect(settingsButton, &QPushButton::clicked, this, &WhisperGUI::showSettingsDialog);
     
-    // OpenAI相关控件初始化
-    apiUrlLabel = new QLabel("API URL: Not Set", this);
-    modelLabel = new QLabel("Model: Not Set", this);
-    
-    // 添加API连接测试按钮
-    QPushButton* testAPIButton = new QPushButton("Test API Connection", this);
-    testAPIButton->setToolTip("Check Python API server connection status");
-    connect(testAPIButton, &QPushButton::clicked, this, &WhisperGUI::checkOpenAIAPIConnection);
-    
-    // 创建一个水平布局放置这两个控件
-    QHBoxLayout* apiLabelsLayout = new QHBoxLayout();
-    apiLabelsLayout->addWidget(apiUrlLabel);
-    apiLabelsLayout->addWidget(modelLabel);
-    apiLabelsLayout->addWidget(testAPIButton);
+    // OpenAI相关控件移动到高级设置中
     
     // 设置控件样式和属性
-    useOpenAICheck->setToolTip("Enable processing with OpenAI Whisper API");
     
     // 构建选择语言用的数据
     languageCombo->addItem("Auto Detect", "auto");
@@ -322,7 +295,6 @@ void WhisperGUI::setupUI() {
     controlsLayout->addWidget(targetLanguageCombo);
     controlsLayout->addWidget(dualLanguageCheck);
     controlsLayout->addWidget(fastModeCheck);
-    controlsLayout->addWidget(useOpenAICheck);
     controlsLayout->addWidget(recognitionModeLabel);
     controlsLayout->addWidget(recognitionModeCombo);
     controlsLayout->addWidget(settingsButton);
@@ -330,9 +302,8 @@ void WhisperGUI::setupUI() {
     
     // 添加控制布局到主布局
     mainLayout->addLayout(controlsLayout);
-    mainLayout->addLayout(apiLabelsLayout);
     
-    // 字幕控制区域
+    // 字幕控制区域简化
     subtitleControlsLayout = new QHBoxLayout();
     enableSubtitlesCheckBox = new QCheckBox("Show Subtitles", this);
     
@@ -341,25 +312,21 @@ void WhisperGUI::setupUI() {
     subtitlePositionComboBox = new QComboBox(this);
     subtitlePositionComboBox->addItem("Top");
     subtitlePositionComboBox->addItem("Bottom");
-    
-    // 字幕源下拉框
-    QLabel* sourceLabel = new QLabel("Source:", this);
-    subtitleSourceComboBox = new QComboBox(this);
-    subtitleSourceComboBox->addItem("Local Recognition");
-    subtitleSourceComboBox->addItem("OpenAI API");
+    subtitlePositionComboBox->setCurrentIndex(1); // 默认底部
+    subtitlePositionComboBox->setEnabled(false);
     
     // 双语字幕选项
     dualSubtitlesCheckBox = new QCheckBox("Dual Language Subtitles", this);
+    dualSubtitlesCheckBox->setEnabled(false);
     
     // 导出字幕按钮
     exportSubtitlesButton = new QPushButton("Export Subtitles", this);
+    exportSubtitlesButton->setEnabled(false);
     
     // 添加到布局
     subtitleControlsLayout->addWidget(enableSubtitlesCheckBox);
     subtitleControlsLayout->addWidget(positionLabel);
     subtitleControlsLayout->addWidget(subtitlePositionComboBox);
-    subtitleControlsLayout->addWidget(sourceLabel);
-    subtitleControlsLayout->addWidget(subtitleSourceComboBox);
     subtitleControlsLayout->addWidget(dualSubtitlesCheckBox);
     subtitleControlsLayout->addWidget(exportSubtitlesButton);
     subtitleControlsLayout->addStretch();
@@ -381,70 +348,24 @@ void WhisperGUI::setupUI() {
     videoContainerLayout->setAlignment(subtitleLabel, Qt::AlignBottom | Qt::AlignHCenter);
     videoContainerLayout->setContentsMargins(10, 10, 10, 10);
 
-    // 实时分段设置区域
-    QHBoxLayout* segmentLayout = new QHBoxLayout();
-    useRealtimeSegmentsCheck = new QCheckBox("Use Realtime Segmentation", this);
-    
-    // 分段大小设置
-    segmentSizeLabel = new QLabel("Segment Size (ms):", this);
-    segmentSizeSpinBox = new QSpinBox(this);
-    segmentSizeSpinBox->setRange(1000, 15000);  // 1-15秒范围
-    segmentSizeSpinBox->setSingleStep(500);     // 500ms步进
-    segmentSizeSpinBox->setValue(7000);         // 默认7秒
-    
-    // 分段重叠设置
-    segmentOverlapLabel = new QLabel("Overlap (ms):", this);
-    segmentOverlapSpinBox = new QSpinBox(this);
-    segmentOverlapSpinBox->setRange(0, 5000);   // 0-5秒范围
-    segmentOverlapSpinBox->setSingleStep(100);  // 100ms步进
-    segmentOverlapSpinBox->setValue(1000);      // 默认1秒
-    
-    segmentLayout->addWidget(useRealtimeSegmentsCheck);
-    segmentLayout->addWidget(segmentSizeLabel);
-    segmentLayout->addWidget(segmentSizeSpinBox);
-    segmentLayout->addWidget(segmentOverlapLabel);
-    segmentLayout->addWidget(segmentOverlapSpinBox);
-    segmentLayout->addStretch();
 
-    // 将分段布局添加到主布局的新行，而不是控制按钮行
-    mainLayout->addLayout(segmentLayout);
     
-    // 创建三列输出布局
+    // 创建两列输出布局
     QHBoxLayout* contentLayout = new QHBoxLayout();
     
-    // 左侧：实时输出区域
-    QVBoxLayout* realtimeLayout = new QVBoxLayout();
-    realTimeOutput = new QTextEdit(this);
-    realTimeOutput->setReadOnly(true);
-    
-    // 设置文本编辑控件的字体和样式
-    QFont textFont = realTimeOutput->font();
-    textFont.setPointSize(11);
-    realTimeOutput->setFont(textFont);
-    realTimeOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
-    
-    realtimeLayout->addWidget(new QLabel("Real-time Output:", this));
-    realtimeLayout->addWidget(realTimeOutput);
-    
-    // 中间：最终输出区域
-    QVBoxLayout* finalLayout = new QVBoxLayout();
+    // 左侧：主输出区域（原最终输出）
+    QVBoxLayout* outputLayout = new QVBoxLayout();
     finalOutput = new QTextEdit(this);
     finalOutput->setReadOnly(true);
+    
+    // 设置文本编辑控件的字体和样式
+    QFont textFont = finalOutput->font();
+    textFont.setPointSize(11);
     finalOutput->setFont(textFont);
     finalOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
     
-    finalLayout->addWidget(new QLabel("Final Output:", this));
-    finalLayout->addWidget(finalOutput);
-    
-    // 右侧: OpenAI API 输出区域
-    QVBoxLayout* openaiLayout = new QVBoxLayout();
-    openaiOutput = new QTextEdit(this);
-    openaiOutput->setReadOnly(true);
-    openaiOutput->setFont(textFont);
-    openaiOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
-    
-    openaiLayout->addWidget(new QLabel("OpenAI API Output:", this));
-    openaiLayout->addWidget(openaiOutput);
+    outputLayout->addWidget(new QLabel("Output:", this));
+    outputLayout->addWidget(finalOutput);
     
     // 右侧：日志区域
     QVBoxLayout* logLayout = new QVBoxLayout();
@@ -457,67 +378,18 @@ void WhisperGUI::setupUI() {
     logLayout->addWidget(logOutput);
     
     // 按比例分配区域宽度
-    QWidget* leftColumn = new QWidget(this);
-    leftColumn->setLayout(realtimeLayout);
+    QWidget* outputColumn = new QWidget(this);
+    outputColumn->setLayout(outputLayout);
     
-    QWidget* centerColumn = new QWidget(this);
-    centerColumn->setLayout(finalLayout);
+    QWidget* logColumn = new QWidget(this);
+    logColumn->setLayout(logLayout);
     
-    QWidget* rightTopColumn = new QWidget(this);
-    rightTopColumn->setLayout(openaiLayout);
-    
-    QWidget* rightBottomColumn = new QWidget(this);
-    rightBottomColumn->setLayout(logLayout);
-    
-    // 创建垂直分割的右侧面板
-    QVBoxLayout* rightPanelLayout = new QVBoxLayout();
-    rightPanelLayout->addWidget(rightTopColumn);
-    rightPanelLayout->addWidget(rightBottomColumn);
-    
-    QWidget* rightPanel = new QWidget(this);
-    rightPanel->setLayout(rightPanelLayout);
-    
-    // 添加所有区域到主布局 (左2:中2:右1的比例)
-    contentLayout->addWidget(leftColumn, 2);
-    contentLayout->addWidget(centerColumn, 2);
-    contentLayout->addWidget(rightPanel, 1);
+    // 添加区域到主布局 (左3:右1的比例)
+    contentLayout->addWidget(outputColumn, 3);
+    contentLayout->addWidget(logColumn, 1);
     
     mainLayout->addLayout(contentLayout);
-    
-    // 添加字幕控制布局
-    subtitleControlsLayout = new QHBoxLayout();
-    
-    enableSubtitlesCheckBox = new QCheckBox("Enable Subtitles");
-    enableSubtitlesCheckBox->setChecked(false);
-    
-    subtitlePositionComboBox = new QComboBox();
-    subtitlePositionComboBox->addItem("Top");
-    subtitlePositionComboBox->addItem("Bottom");
-    subtitlePositionComboBox->setCurrentIndex(1); // 默认底部
-    subtitlePositionComboBox->setEnabled(false);
-    
-    subtitleSourceComboBox = new QComboBox();
-    subtitleSourceComboBox->addItem("Local Recognition");
-    subtitleSourceComboBox->addItem("OpenAI API");
-    subtitleSourceComboBox->setCurrentIndex(0); // 默认本地识别
-    subtitleSourceComboBox->setEnabled(false);
-    
-    dualSubtitlesCheckBox = new QCheckBox("Dual Subtitles");
-    dualSubtitlesCheckBox->setChecked(false);
-    dualSubtitlesCheckBox->setEnabled(false);
-    
-    exportSubtitlesButton = new QPushButton("Export Subtitles");
-    exportSubtitlesButton->setEnabled(false);
-    
-    subtitleControlsLayout->addWidget(enableSubtitlesCheckBox);
-    subtitleControlsLayout->addWidget(new QLabel("Position:"));
-    subtitleControlsLayout->addWidget(subtitlePositionComboBox);
-    subtitleControlsLayout->addWidget(new QLabel("Source:"));
-    subtitleControlsLayout->addWidget(subtitleSourceComboBox);
-    subtitleControlsLayout->addWidget(dualSubtitlesCheckBox);
-    subtitleControlsLayout->addWidget(exportSubtitlesButton);
-    
-    mainLayout->addLayout(subtitleControlsLayout);
+
     
     // 添加字幕标签
     subtitleLabel = new QLabel("");
@@ -576,14 +448,8 @@ void WhisperGUI::setupUI() {
     playPauseButton->setEnabled(false);
     positionSlider->setEnabled(false);
     
-    // OpenAI API开关默认不选中
-    useOpenAICheck->setChecked(false);
-    
     // 设置默认识别模式
     recognitionModeCombo->setCurrentIndex(0); // 默认使用快速识别模式
-    
-    // 添加工具提示
-    useOpenAICheck->setToolTip("Enable/Disable using OpenAI API to recongnize");
 }
 
 void WhisperGUI::setupConnections() {
@@ -617,23 +483,11 @@ void WhisperGUI::setupConnections() {
     // 连接临时文件创建信号
     connect(audioProcessor, &AudioProcessor::temporaryFileCreated, this, &WhisperGUI::onTemporaryFileCreated);
     
-    // 添加OpenAI开关的处理
-    connect(useOpenAICheck, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState state) {
-        onUseOpenAIChanged(static_cast<int>(state));
-    });
-
-    // 实时分段选项
-    connect(useRealtimeSegmentsCheck, &QCheckBox::checkStateChanged,
-            this, &WhisperGUI::onUseRealtimeSegmentsChanged);
-    connect(segmentSizeSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, &WhisperGUI::onSegmentSizeChanged);
-    connect(segmentOverlapSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
-            this, &WhisperGUI::onSegmentOverlapChanged);
+    // 实时分段选项已移除
 
     // 连接字幕相关信号和槽
     connect(enableSubtitlesCheckBox, &QCheckBox::checkStateChanged, this, &WhisperGUI::onEnableSubtitlesChanged);
     connect(subtitlePositionComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &WhisperGUI::onSubtitlePositionChanged);
-    connect(subtitleSourceComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &WhisperGUI::onSubtitleSourceChanged);
     connect(dualSubtitlesCheckBox, &QCheckBox::checkStateChanged, this, &WhisperGUI::onDualSubtitlesChanged);
     connect(exportSubtitlesButton, &QPushButton::clicked, this, &WhisperGUI::onExportSubtitles);
     
@@ -908,56 +762,11 @@ void WhisperGUI::onMediaPlayerError(QMediaPlayer::Error error, const QString& er
     appendLogMessage("Error code: " + QString::number(static_cast<int>(error)));
 }
 
-void WhisperGUI::appendRealTimeOutput(const QString& text) {
-    // 将文本封装在span标签中以应用样式
-    realTimeOutput->append("<span>" + text + "</span>");
-    realTimeOutput->verticalScrollBar()->setValue(
-        realTimeOutput->verticalScrollBar()->maximum());
-}
-
 void WhisperGUI::appendFinalOutput(const QString& text) {
     // 将文本封装在span标签中以应用样式
     finalOutput->append("<span>" + text + "</span>");
     finalOutput->verticalScrollBar()->setValue(
         finalOutput->verticalScrollBar()->maximum());
-}
-
-void WhisperGUI::appendOpenAIOutput(const QString& text) {
-    // 添加接收信号的日志
-    qDebug() << "WhisperGUI::appendOpenAIOutput: Received text, length: " 
-             << text.length() << " Beginning: " << text.left(20);
-    appendLogMessage("Received OpenAI output, length: " + QString::number(text.length()) + " Beginning: " + text.left(20));
-    
-    // 检查openaiOutput是否为空
-    if (!openaiOutput) {
-        qCritical() << "WhisperGUI::appendOpenAIOutput: openaiOutput is null";
-        appendLogMessage("ERROR: OpenAI output control is null, cannot display result");
-        return;
-    }
-    
-    try {
-        // 将文本封装在span标签中以应用样式
-        openaiOutput->append("<span>" + text + "</span>");
-        
-        // 检查滚动条是否为空
-        if (openaiOutput->verticalScrollBar()) {
-            openaiOutput->verticalScrollBar()->setValue(
-                openaiOutput->verticalScrollBar()->maximum());
-            qDebug() << "WhisperGUI::appendOpenAIOutput: Text added and scrolled to bottom";
-        } else {
-            qWarning() << "WhisperGUI::appendOpenAIOutput: Scroll bar is null";
-            appendLogMessage("WARN: OpenAI output control scroll bar is null");
-        }
-        
-        // 向日志窗口添加一条消息
-        appendLogMessage("OpenAI output has been updated, length: " + QString::number(text.length()));
-    } catch (const std::exception& e) {
-        qCritical() << "WhisperGUI::appendOpenAIOutput exception:" << e.what();
-        appendLogMessage("ERROR: Exception when updating OpenAI output: " + QString::fromStdString(e.what()));
-    } catch (...) {
-        qCritical() << "WhisperGUI::appendOpenAIOutput unknown exception";
-        appendLogMessage("ERROR: Unknown exception when updating OpenAI output");
-    }
 }
 
 void WhisperGUI::appendLogMessage(const QString& message) {
@@ -1268,9 +1077,6 @@ void WhisperGUI::onUseOpenAIChanged(int state) {
         audioProcessor->setUseOpenAI(enabled);
     }
     appendLogMessage(enabled ? "OpenAI API enabled" : "OpenAI API disabled");
-    
-    // 更新分段控件状态
-    updateRealtimeSegmentControls();
 }
 
 // 实现原有的 startRecording 方法 (在 onStartButtonClicked 之外单独保留)
@@ -1361,9 +1167,7 @@ void WhisperGUI::startRecording() {
         }
         
         // 清空输出区域，准备接收新的识别结果
-        realTimeOutput->clear();
         finalOutput->clear();
-        openaiOutput->clear();
         
         // 开始处理
         audioProcessor->startProcessing();
@@ -1382,8 +1186,7 @@ void WhisperGUI::startRecording() {
             updateMediaPosition();
             
             // 为避免视频播放超前，添加短暂延迟等待音频处理初始化
-            if (currentMode == AudioProcessor::InputMode::VIDEO_FILE && 
-                useOpenAICheck->isChecked()) {
+            if (currentMode == AudioProcessor::InputMode::VIDEO_FILE) {
                 appendLogMessage("Adding brief delay to synchronize video with audio processing...");
                 QThread::msleep(500);  // 增加短暂延迟，让音频处理有时间初始化
             }
@@ -1486,54 +1289,7 @@ void WhisperGUI::selectInputFile() {
     }
 }
 
-void WhisperGUI::onUseRealtimeSegmentsChanged(int state) {
-    bool enabled = (state == Qt::Checked);
-    
-    // 更新UI状态
-    segmentSizeSpinBox->setEnabled(enabled);
-    segmentOverlapSpinBox->setEnabled(enabled);
-    
-    // 更新处理器设置
-    if (audioProcessor) {
-        audioProcessor->setRealtimeMode(enabled);
-    }
-    
-    appendLogMessage(enabled ? "Realtime segmentation enabled" : "Realtime segmentation disabled");
-    
-    // 如果启用分段但未启用OpenAI，也启用OpenAI
-    if (enabled && !useOpenAICheck->isChecked()) {
-        useOpenAICheck->setChecked(true);
-    }
-    
-    updateRealtimeSegmentControls();
-}
 
-void WhisperGUI::onSegmentSizeChanged(int value) {
-    if (audioProcessor) {
-        audioProcessor->setSegmentSize(static_cast<size_t>(value));
-        appendLogMessage("Segment size set to " + QString::number(value) + " ms");
-    }
-}
-
-void WhisperGUI::onSegmentOverlapChanged(int value) {
-    if (audioProcessor) {
-        audioProcessor->setSegmentOverlap(static_cast<size_t>(value));
-        appendLogMessage("Segment overlap set to " + QString::number(value) + " ms");
-    }
-}
-
-void WhisperGUI::updateRealtimeSegmentControls() {
-    bool openaiEnabled = useOpenAICheck->isChecked();
-    bool segmentsEnabled = useRealtimeSegmentsCheck->isChecked();
-    
-    // 只有启用OpenAI时才能启用分段
-    useRealtimeSegmentsCheck->setEnabled(openaiEnabled);
-    
-    // 如果禁用OpenAI，则也禁用分段
-    if (!openaiEnabled && segmentsEnabled) {
-        useRealtimeSegmentsCheck->setChecked(false);
-    }
-}
 
 // 字幕相关的槽函数实现
 void WhisperGUI::onEnableSubtitlesChanged(int state)
@@ -1542,7 +1298,6 @@ void WhisperGUI::onEnableSubtitlesChanged(int state)
     logMessage(this, "Subtitles " + std::string(enabled ? "enabled" : "disabled"));
     
     subtitlePositionComboBox->setEnabled(enabled);
-    subtitleSourceComboBox->setEnabled(enabled);
     dualSubtitlesCheckBox->setEnabled(enabled);
     exportSubtitlesButton->setEnabled(enabled);
     
@@ -1631,15 +1386,7 @@ void WhisperGUI::onSubtitlePositionChanged(int index)
     logMessage(this, "Subtitle position set to: " + std::string(index == 0 ? "Top" : "Bottom"));
 }
 
-void WhisperGUI::onSubtitleSourceChanged(int index)
-{
-    if (!subtitleManager) return;
-    
-    SubtitleSource source = (index == 0) ? SubtitleSource::Whisper : SubtitleSource::OpenAI;
-    subtitleManager->setSubtitleSource(source);
-    
-    logMessage(this, "Subtitle source set to: " + std::string(index == 0 ? "Local Recognition" : "OpenAI API"));
-}
+
 
 void WhisperGUI::onDualSubtitlesChanged(int state)
 {
@@ -1717,7 +1464,7 @@ void WhisperGUI::onSubtitleExported(const QString& filePath, bool success)
 void WhisperGUI::onRecognitionResult(const std::string& result)
 {
     // 添加到实时输出
-    appendRealTimeOutput(QString::fromStdString(result));
+            appendFinalOutput(QString::fromStdString(result));
     
     // 如果启用了字幕功能，将识别结果添加到字幕管理器中
     if (enableSubtitlesCheckBox && enableSubtitlesCheckBox->isChecked() && subtitleManager) {
@@ -1773,8 +1520,8 @@ void WhisperGUI::onOpenAIResultReady(const QString& result)
     LOG_INFO("Result preview: " + preview.toStdString());
     
     // Directly add the result to the OpenAI output area, skipping unnecessary processing
-    LOG_INFO("Calling appendOpenAIOutput to display result");
-    appendOpenAIOutput(result);
+            LOG_INFO("Calling appendFinalOutput to display result");
+        appendFinalOutput(result);
     
     // If subtitles are enabled, add the recognition result to the subtitle manager
     if (enableSubtitlesCheckBox && enableSubtitlesCheckBox->isChecked() && subtitleManager) {
@@ -1868,14 +1615,7 @@ void WhisperGUI::handleOpenAIError(const QString& error) {
 }
 
 void WhisperGUI::updateOpenAISettings(bool use_openai, const std::string& server_url) {
-    if (useOpenAICheck) {
-        useOpenAICheck->setChecked(use_openai);
-    }
-    
-    // 更新API服务器URL显示
-    if (apiUrlLabel) {
-        apiUrlLabel->setText(QString::fromStdString(server_url));
-    }
+    // OpenAI设置已移动到高级设置对话框中
     
     // 更新日志
     appendLogMessage(QString("OpenAI API settings updated: enabled=%1, server=%2")
@@ -1884,12 +1624,7 @@ void WhisperGUI::updateOpenAISettings(bool use_openai, const std::string& server
 }
 
 void WhisperGUI::updateOpenAIModel(const std::string& model) {
-    // 更新模型显示
-    if (modelLabel) {
-        modelLabel->setText(QString::fromStdString(model));
-    }
-    
-    // 更新日志
+    // OpenAI模型设置已移动到高级设置对话框中
     appendLogMessage(QString("OpenAI model updated: %1")
                     .arg(QString::fromStdString(model)));
 }
@@ -1915,12 +1650,30 @@ void WhisperGUI::onProcessingFullyStopped() {
 }
 
 void WhisperGUI::showSettingsDialog() {
-    // 创建设置对话框，不再指定父窗口以创建独立窗口
-    QDialog* settingsDialog = new QDialog(nullptr);
-    settingsDialog->setWindowTitle("Advanced Settings");
-    settingsDialog->setMinimumWidth(500);
+    // 防止重复创建配置对话框
+    if (s_settingsDialog && s_settingsDialog->isVisible()) {
+        s_settingsDialog->raise();
+        s_settingsDialog->activateWindow();
+        return;
+    }
     
-    QVBoxLayout* settingsLayout = new QVBoxLayout(settingsDialog);
+    // 如果之前的对话框已被删除，重新创建
+    if (s_settingsDialog) {
+        s_settingsDialog->deleteLater();
+        s_settingsDialog = nullptr;
+    }
+    
+    // 创建设置对话框，不再指定父窗口以创建独立窗口
+    s_settingsDialog = new QDialog(nullptr);
+    s_settingsDialog->setWindowTitle("Advanced Settings");
+    s_settingsDialog->setMinimumWidth(500);
+    
+    // 确保对话框被删除时重置静态指针
+    connect(s_settingsDialog, &QDialog::destroyed, []() {
+        WhisperGUI::s_settingsDialog = nullptr;
+    });
+    
+    QVBoxLayout* settingsLayout = new QVBoxLayout(s_settingsDialog);
     
     // 其他设置组（已有的设置保持不变）
     QGroupBox* modelSettingsGroup = new QGroupBox(tr("Model Settings"));
@@ -1960,9 +1713,31 @@ void WhisperGUI::showSettingsDialog() {
     QHBoxLayout* preciseServerLayout = new QHBoxLayout();
     QLabel* preciseServerLabel = new QLabel(tr("Precise Recognition Server URL:"));
     QLineEdit* preciseServerEdit = new QLineEdit();
-    // 设置当前值
-    preciseServerEdit->setText(QString::fromStdString(
-        audioProcessor ? audioProcessor->getPreciseServerURL() : "http://localhost:8080"));
+    
+    // 修复问题1：优先从配置文件读取精确服务器URL
+    std::string configServerUrl;
+    try {
+        ConfigManager& configManager = ConfigManager::getInstance();
+        configServerUrl = configManager.getPreciseServerURL();
+        
+        // 如果从配置文件读取成功，使用配置文件的值
+        if (!configServerUrl.empty() && configServerUrl != "http://localhost:8080") {
+            preciseServerEdit->setText(QString::fromStdString(configServerUrl));
+            // 同时更新AudioProcessor中的值以保持一致性
+            if (audioProcessor) {
+                audioProcessor->setPreciseServerURL(configServerUrl);
+            }
+        } else {
+            // 如果配置文件没有有效值，从AudioProcessor获取
+            preciseServerEdit->setText(QString::fromStdString(
+                audioProcessor ? audioProcessor->getPreciseServerURL() : "http://localhost:8080"));
+        }
+    } catch (const std::exception& e) {
+        // 如果读取配置失败，从AudioProcessor获取
+        preciseServerEdit->setText(QString::fromStdString(
+            audioProcessor ? audioProcessor->getPreciseServerURL() : "http://localhost:8080"));
+        appendLogMessage("Warning: Failed to read server URL from config: " + QString::fromStdString(e.what()));
+    }
     
     // 测试连接按钮
     QPushButton* testConnectionButton = new QPushButton(tr("Test Connection"));
@@ -2035,6 +1810,91 @@ void WhisperGUI::showSettingsDialog() {
     preciseServerLayout->addWidget(saveServerButton);
     
     serverSettingsLayout->addLayout(preciseServerLayout);
+    
+    // OpenAI API设置
+    QHBoxLayout* openaiServerLayout = new QHBoxLayout();
+    QLabel* openaiServerLabel = new QLabel(tr("OpenAI API Server URL:"));
+    QLineEdit* openaiServerEdit = new QLineEdit();
+    openaiServerEdit->setText(QString::fromStdString(
+        audioProcessor ? audioProcessor->getOpenAIServerURL() : "http://127.0.0.1:5000"));
+    
+    // OpenAI模型设置
+    QHBoxLayout* openaiModelLayout = new QHBoxLayout();
+    QLabel* openaiModelLabel = new QLabel(tr("OpenAI Model:"));
+    QLineEdit* openaiModelEdit = new QLineEdit();
+    openaiModelEdit->setText(QString::fromStdString(
+        audioProcessor ? audioProcessor->getOpenAIModel() : "whisper-1"));
+    
+    // OpenAI启用复选框
+    QCheckBox* useOpenAICheckBox = new QCheckBox(tr("Enable OpenAI API"));
+    useOpenAICheckBox->setChecked(audioProcessor ? audioProcessor->isUsingOpenAI() : false);
+    
+    // OpenAI连接测试按钮
+    QPushButton* testOpenAIButton = new QPushButton(tr("Test OpenAI Connection"));
+    connect(testOpenAIButton, &QPushButton::clicked, this, [this, openaiServerEdit]() {
+        if (audioProcessor) {
+            // 保存新的URL
+            std::string newUrl = openaiServerEdit->text().toStdString();
+            audioProcessor->setOpenAIServerURL(newUrl);
+            
+            // 显示等待状态
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            
+            // 测试连接
+            bool success = audioProcessor->testOpenAIConnection();
+            
+            // 恢复鼠标状态
+            QApplication::restoreOverrideCursor();
+            
+            if (success) {
+                QMessageBox::information(this, tr("Connection Successful"), 
+                    tr("Successfully connected to the OpenAI API server."));
+                appendLogMessage("OpenAI API connection test successful: " + QString::fromStdString(newUrl));
+            } else {
+                QMessageBox::warning(this, tr("Connection Failed"), 
+                    tr("Failed to connect to the OpenAI API server. Please check the URL and server status."));
+                appendLogMessage("OpenAI API connection test failed: " + QString::fromStdString(newUrl));
+            }
+        }
+    });
+    
+    // 保存OpenAI设置按钮
+    QPushButton* saveOpenAIButton = new QPushButton(tr("Save OpenAI Settings"));
+    connect(saveOpenAIButton, &QPushButton::clicked, this, [this, openaiServerEdit, openaiModelEdit, useOpenAICheckBox]() {
+        if (audioProcessor) {
+            std::string newUrl = openaiServerEdit->text().toStdString();
+            std::string newModel = openaiModelEdit->text().toStdString();
+            bool enableOpenAI = useOpenAICheckBox->isChecked();
+            
+            audioProcessor->setOpenAIServerURL(newUrl);
+            audioProcessor->setOpenAIModel(newModel);
+            audioProcessor->setUseOpenAI(enableOpenAI);
+            
+            appendLogMessage("OpenAI settings updated - URL: " + QString::fromStdString(newUrl) + 
+                           ", Model: " + QString::fromStdString(newModel) + 
+                           ", Enabled: " + (enableOpenAI ? "Yes" : "No"));
+        }
+    });
+    
+    connect(useOpenAICheckBox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (audioProcessor) {
+            audioProcessor->setUseOpenAI(checked);
+            appendLogMessage(checked ? "OpenAI API enabled" : "OpenAI API disabled");
+        }
+    });
+    
+    openaiServerLayout->addWidget(openaiServerLabel);
+    openaiServerLayout->addWidget(openaiServerEdit);
+    openaiServerLayout->addWidget(testOpenAIButton);
+    
+    openaiModelLayout->addWidget(openaiModelLabel);
+    openaiModelLayout->addWidget(openaiModelEdit);
+    
+    serverSettingsLayout->addLayout(openaiServerLayout);
+    serverSettingsLayout->addLayout(openaiModelLayout);
+    serverSettingsLayout->addWidget(useOpenAICheckBox);
+    serverSettingsLayout->addWidget(saveOpenAIButton);
+    
     serverSettingsGroup->setLayout(serverSettingsLayout);
     
     // VAD设置组
@@ -2130,7 +1990,7 @@ void WhisperGUI::showSettingsDialog() {
     // 添加按钮
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     QPushButton* closeButton = new QPushButton("Close");
-    connect(closeButton, &QPushButton::clicked, settingsDialog, &QDialog::accept);
+    connect(closeButton, &QPushButton::clicked, s_settingsDialog, &QDialog::accept);
     buttonLayout->addStretch();
     buttonLayout->addWidget(closeButton);
     
@@ -2143,8 +2003,8 @@ void WhisperGUI::showSettingsDialog() {
     settingsLayout->addLayout(buttonLayout);
     
     // 不再设置为模态对话框，允许同时操作主窗口
-    settingsDialog->setAttribute(Qt::WA_DeleteOnClose);
-    settingsDialog->show();
+    s_settingsDialog->setAttribute(Qt::WA_DeleteOnClose);
+    s_settingsDialog->show();
 }
 
 void WhisperGUI::onRecognitionModeChanged(int index) {
@@ -2191,10 +2051,7 @@ void WhisperGUI::onRecognitionModeChanged(int index) {
     case 2:
         mode = RecognitionMode::OPENAI_RECOGNITION;
         modeName = "OpenAI Recognition (Cloud API)";
-        // 自动启用OpenAI设置
-        if (!useOpenAICheck->isChecked()) {
-            useOpenAICheck->setChecked(true);
-        }
+        // OpenAI设置已移动到高级设置中
         break;
     default:
         mode = RecognitionMode::FAST_RECOGNITION;
@@ -2207,9 +2064,7 @@ void WhisperGUI::onRecognitionModeChanged(int index) {
         audioProcessor->setRecognitionMode(mode);
         appendLogMessage("Recognition mode changed to: " + modeName);
         
-        // 根据模式更新UI状态
-        useRealtimeSegmentsCheck->setEnabled(mode == RecognitionMode::OPENAI_RECOGNITION ||
-                                            mode == RecognitionMode::PRECISE_RECOGNITION);
+        // 实时分段控件已移除
         
         // 当选择OpenAI模式时，确保useOpenAI选项打开
         if (mode == RecognitionMode::OPENAI_RECOGNITION) {
