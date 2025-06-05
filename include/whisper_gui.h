@@ -25,6 +25,10 @@
 #include <QHBoxLayout>
 #include <QSpinBox>
 #include <QDialog>
+#include <QLineEdit>
+#include <QProgressBar>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <queue>
 #include <mutex>
 #include <memory>
@@ -109,6 +113,9 @@ public slots:
     void onRecognitionModeChanged(int index);
     void showVideoWidget(QVideoWidget* widget);
     void prepareVideoWidget();
+    void onStreamUrlChanged();
+    void validateStreamConnection();
+    void onStreamValidationFinished();
     
     // 添加获取视频组件的方法到 slots 中
     QVideoWidget* getVideoWidget() { return videoWidget; }
@@ -135,6 +142,12 @@ private:
     QSlider* positionSlider;
     QLabel* timeLabel;
     QLabel* durationLabel;
+    
+    // 视频流输入相关
+    QLabel* streamUrlLabel;
+    QLineEdit* streamUrlEdit;
+    QProgressBar* streamValidationProgress;
+    QLabel* streamStatusLabel;
     QComboBox* languageCombo;
     QComboBox* targetLanguageCombo;
     QCheckBox* dualLanguageCheck;
@@ -162,6 +175,11 @@ private:
     bool isRecording;
     bool isPlaying;
     QString currentFilePath;
+    QString currentStreamUrl;
+    
+    // 流验证相关
+    QNetworkAccessManager* streamValidator;
+    QTimer* streamValidationTimer;
     
     // 字幕管理器
     std::unique_ptr<SubtitleManager> subtitleManager;

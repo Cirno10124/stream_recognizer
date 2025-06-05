@@ -12,11 +12,11 @@
 // 前向声明，避免循环引用
 //class WhisperGUI;
 
-// 简单的日志宏，可以根据需要扩展
-#define LOG_INFO(msg) qInfo() << "[INFO] " << msg
-#define LOG_ERROR(msg) qCritical() << "[ERROR] " << msg
-#define LOG_WARNING(msg) qWarning() << "[WARNING] " << msg
-#define LOG_DEBUG(msg) qDebug() << "[DEBUG] " << msg
+// 修改为使用std::cout的日志宏，避免中文乱码问题
+#define LOG_INFO(msg) std::cout << "[INFO] " << msg << std::endl
+#define LOG_ERROR(msg) std::cerr << "[ERROR] " << msg << std::endl
+#define LOG_WARNING(msg) std::cout << "[WARNING] " << msg << std::endl
+#define LOG_DEBUG(msg) std::cout << "[DEBUG] " << msg << std::endl
 
 // 声明为内联函数，避免多重定义
 inline void logMessage(WhisperGUI* gui, const std::string& message, bool isError = false) {

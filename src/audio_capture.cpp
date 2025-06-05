@@ -80,7 +80,7 @@ bool AudioCapture::start() {
         if (!segment_handler->start()) {
             LOG_ERROR("无法启动麦克风实时分段处理器");
         } else {
-            LOG_INFO("已启动麦克风实时分段处理器：段大小=" + 
+            LOG_INFO("Started microphone real-time segment processor: segment size=" + 
                     std::to_string(segment_size_ms) + "ms, 重叠=" + 
                     std::to_string(segment_overlap_ms) + "ms");
         }
@@ -98,7 +98,7 @@ bool AudioCapture::start() {
 // 新增方法：在当前线程中处理音频
 void AudioCapture::processAudioInCurrentThread(void* stream, int frames_per_buffer, int sample_rate) {
     std::vector<float> buffer(frames_per_buffer);
-    LOG_INFO("音频捕获开始（单线程模式），每个片段长度: " + 
+            LOG_INFO("Audio capture started (single-thread mode), segment length: " + 
             std::to_string(frames_per_buffer * 1000.0 / sample_rate) + " 毫秒");
     
     // 设置一个合理的处理循环次数，避免无限循环
@@ -143,7 +143,7 @@ void AudioCapture::processAudioInCurrentThread(void* stream, int frames_per_buff
     Pa_CloseStream(stream);
     Pa_Terminate();
     
-    LOG_INFO("音频捕获已停止（单线程模式）");
+    LOG_INFO("Audio capture stopped (single-thread mode)");
 }
 
 void AudioCapture::stop() {
@@ -186,7 +186,7 @@ void AudioCapture::enableRealtimeSegmentation(bool enable, size_t segment_size_m
     this->segment_size_ms = segment_size_ms;
     this->segment_overlap_ms = overlap_ms;
     
-    LOG_INFO("实时分段设置更新: 启用=" + std::string(enable ? "是" : "否") +
+            LOG_INFO("Real-time segmentation settings updated: enabled=" + std::string(enable ? "yes" : "no") +
              ", 段大小=" + std::to_string(segment_size_ms) + "ms" +
              ", 重叠=" + std::to_string(overlap_ms) + "ms");
     
@@ -210,14 +210,14 @@ void AudioCapture::enableRealtimeSegmentation(bool enable, size_t segment_size_m
         if (!segment_handler->start()) {
             LOG_ERROR("无法启动更新后的麦克风实时分段处理器");
         } else {
-            LOG_INFO("已重启麦克风实时分段处理器：段大小=" + 
+            LOG_INFO("Restarted microphone real-time segment processor: segment size=" + 
                     std::to_string(segment_size_ms) + "ms, 重叠=" + 
                     std::to_string(overlap_ms) + "ms");
         }
     } else if (running) {
         LOG_WARNING("实时分段设置已更改，但分段处理器不存在，无法更新");
     } else {
-        LOG_INFO("实时分段设置已更改，将在下次启动时生效");
+        LOG_INFO("Real-time segmentation settings changed, will take effect on next start");
     }
 }
 
@@ -226,7 +226,7 @@ void AudioCapture::setSegmentCallback(MicrophoneSegmentCallback callback) {
 }
 
 void AudioCapture::onSegmentReady(const AudioSegment& segment) {
-    LOG_INFO("麦克风捕获新音频段: " + segment.filepath);
+    LOG_INFO("Microphone captured new audio segment: " + segment.filepath);
     
     // 调用回调函数
     if (segment_callback) {

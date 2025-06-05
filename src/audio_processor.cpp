@@ -26,6 +26,7 @@
 #include <QProcess>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QTextStream>
 #include <QNetworkAccessManager>
 #include <QEventLoop>
@@ -85,7 +86,7 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
     , precise_network_manager(nullptr)  // 初始化为nullptr
 {
     try {
-        LOG_INFO("开始初始化AudioProcessor...");
+        LOG_INFO("Starting AudioProcessor initialization...");
         
     // 初始化基本参数
     use_gpu = g_use_gpu;
@@ -99,24 +100,27 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
         base_energy_level = 0.0f;
         adaptive_threshold = 0.01f;  // 初始阈值
         
-        LOG_INFO("初始化VAD检测器...");
+        LOG_INFO("Initializing VAD detector...");
         
         // VAD将在Qt multimedia完全初始化后延迟创建
         // 这样可以避免与Qt FFmpeg的堆内存分配冲突
-        LOG_INFO("VAD检测器将延迟初始化，避免与Qt multimedia冲突");
+        LOG_INFO("VAD detector will be lazily initialized to avoid conflicts with Qt multimedia");
         
-        LOG_INFO("初始化音频预处理器...");
+        // 确保voice_detector智能指针初始为空，避免悬空指针
+        voice_detector.reset();
+        
+        LOG_INFO("Initializing audio preprocessor...");
         
         // 安全初始化音频预处理器
         try {
     audio_preprocessor = std::make_unique<AudioPreprocessor>();
-            LOG_INFO("音频预处理器初始化成功");
+            LOG_INFO("Audio preprocessor initialization successful");
         } catch (const std::exception& e) {
             LOG_ERROR("音频预处理器初始化失败: " + std::string(e.what()));
             throw std::runtime_error("Failed to initialize audio preprocessor: " + std::string(e.what()));
         }
     
-        LOG_INFO("初始化音频队列...");
+        LOG_INFO("Initializing audio queues...");
     
         // 安全创建音频队列
         try {
@@ -124,13 +128,13 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
     fast_results = std::make_unique<ResultQueue>();
     precise_results = std::make_unique<ResultQueue>();
     final_results = std::make_unique<ResultQueue>();
-            LOG_INFO("音频队列初始化成功");
+            LOG_INFO("Audio queues initialization successful");
         } catch (const std::exception& e) {
             LOG_ERROR("音频队列初始化失败: " + std::string(e.what()));
             throw std::runtime_error("Failed to initialize audio queues: " + std::string(e.what()));
         }
         
-        LOG_INFO("初始化媒体播放器...");
+        LOG_INFO("Initializing media player...");
         
         // 安全配置媒体播放器（延迟到需要时再创建）
         try {
@@ -244,10 +248,10 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
     // 设置初始化完成标志
     is_initialized = true;
         
-        LOG_INFO("AudioProcessor初始化完成");
-        LOG_INFO("默认识别模式: " + std::to_string(static_cast<int>(current_recognition_mode)) + " (0=快速, 1=精确, 2=OpenAI)");
-        LOG_INFO("要使用精确识别模式，请在GUI中设置或调用setRecognitionMode(RecognitionMode::PRECISE_RECOGNITION)");
-        LOG_INFO("精确识别服务器URL: " + precise_server_url);
+        LOG_INFO("AudioProcessor initialization completed");
+        LOG_INFO("Default recognition mode: " + std::to_string(static_cast<int>(current_recognition_mode)) + " (0=Fast, 1=Precise, 2=OpenAI)");
+        LOG_INFO("To use precise recognition mode, please set in GUI or call setRecognitionMode(RecognitionMode::PRECISE_RECOGNITION)");
+        LOG_INFO("Precise recognition server URL: " + precise_server_url);
         
         if (gui) {
             logMessage(gui, "音频处理器初始化完成，当前为快速识别模式");
@@ -258,7 +262,7 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
         {
             std::lock_guard<std::mutex> lock(instances_mutex);
             all_instances.insert(this);
-            LOG_INFO("AudioProcessor实例已注册，当前实例数: " + std::to_string(all_instances.size()));
+            LOG_INFO("AudioProcessor instance registered, current instance count: " + std::to_string(all_instances.size()));
         }
         
     } catch (const std::exception& e) {
@@ -299,7 +303,7 @@ AudioProcessor::~AudioProcessor() {
         auto it = all_instances.find(this);
         if (it != all_instances.end()) {
             all_instances.erase(it);
-            LOG_INFO("AudioProcessor实例已注销，剩余实例数: " + std::to_string(all_instances.size()));
+            LOG_INFO("AudioProcessor instance unregistered, remaining instances: " + std::to_string(all_instances.size()));
         } else {
             LOG_WARNING("AudioProcessor实例未在跟踪集合中找到");
         }
@@ -699,7 +703,7 @@ bool AudioProcessor::extractAudioFromVideo(const std::string& video_path, const 
     std::thread extraction_thread([this, video_path, audio_path, &extraction_complete, &extraction_success]() {
         try {
             // 异步更新开始日志
-        if (gui) {
+            if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
                     Qt::QueuedConnection, 
                     Q_ARG(QString, QString("开始从视频提取音频: %1").arg(QString::fromStdString(video_path))));
@@ -717,26 +721,62 @@ bool AudioProcessor::extractAudioFromVideo(const std::string& video_path, const 
                 std::filesystem::create_directories(output_dir);
             }
             
-            // 构建FFmpeg命令
-            QString ffmpeg_cmd = QString("ffmpeg -i \"%1\" -vn -acodec pcm_s16le -ar 16000 -ac 1 -y \"%2\"")
-                                .arg(QString::fromStdString(video_path))
-                                .arg(QString::fromStdString(audio_path));
+            // Step 1: 检测原始音频流信息
+            AudioStreamInfo stream_info = detectAudioStreamInfo(video_path);
             
-            // 异步更新执行命令日志
-    if (gui) {
-                QMetaObject::invokeMethod(gui, "appendLogMessage", 
-                    Qt::QueuedConnection, 
-                    Q_ARG(QString, QString("执行FFmpeg命令: %1").arg(ffmpeg_cmd)));
+            if (!stream_info.has_audio) {
+                throw std::runtime_error("No audio stream found in video file");
             }
             
-            // 在后台线程中执行FFmpeg命令
+            // 记录原始音频信息和处理策略
+            if (gui) {
+                QString strategy;
+                if (stream_info.sample_rate == 16000 && stream_info.channels == 1) {
+                    strategy = "✅ 已是目标格式，仅需编码转换";
+                } else {
+                    strategy = QString("🔄 需要转换: %1Hz→16kHz, %2声道→单声道")
+                              .arg(stream_info.sample_rate)
+                              .arg(stream_info.channels);
+                }
+                
+                QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                    Qt::QueuedConnection, 
+                    Q_ARG(QString, QString("🎵 音频流信息: %1 (%2Hz, %3声道) - %4")
+                                         .arg(stream_info.codec)
+                                         .arg(stream_info.sample_rate)
+                                         .arg(stream_info.channels)
+                                         .arg(strategy)));
+            }
+            
+            // Step 2: 构建自适应的FFmpeg命令
+            QString ffmpeg_cmd = buildAdaptiveFFmpegCommand(video_path, audio_path, stream_info);
+            
+            // 异步更新执行命令日志
+            if (gui) {
+                QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                    Qt::QueuedConnection, 
+                    Q_ARG(QString, QString("🚀 执行自适应音频转换 (目标:16kHz单声道PCM)...")));
+                
+                // 在调试模式下显示完整命令（可选）
+                #ifdef DEBUG
+                QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                    Qt::QueuedConnection, 
+                    Q_ARG(QString, QString("🔧 FFmpeg命令: %1").arg(ffmpeg_cmd)));
+                #endif
+            }
+            
+            // Step 3: 执行优化的FFmpeg命令
             QProcess process;
             process.start(ffmpeg_cmd);
             
-            // 等待进程完成，但允许超时
-            if (!process.waitForFinished(60000)) { // 60秒超时
+            // 动态超时：根据文件大小调整
+            auto file_size = std::filesystem::file_size(video_path);
+            int timeout_ms = std::max(30000, static_cast<int>(file_size / (1024 * 1024)) * 5000); // 每MB给5秒
+            timeout_ms = std::min(timeout_ms, 300000); // 最大5分钟
+            
+            if (!process.waitForFinished(timeout_ms)) {
                 process.kill();
-                throw std::runtime_error("FFmpeg process timed out");
+                throw std::runtime_error("FFmpeg process timed out after " + std::to_string(timeout_ms/1000) + " seconds");
             }
             
             int exit_code = process.exitCode();
@@ -751,29 +791,41 @@ bool AudioProcessor::extractAudioFromVideo(const std::string& video_path, const 
                 throw std::runtime_error("Audio extraction failed: output file not created");
             }
             
-            // 检查输出文件大小
-            auto file_size = std::filesystem::file_size(audio_path);
-            if (file_size == 0) {
+            // 检查输出文件大小和质量
+            auto output_file_size = std::filesystem::file_size(audio_path);
+            if (output_file_size == 0) {
                 throw std::runtime_error("Audio extraction failed: output file is empty");
             }
             
-            // 异步更新成功日志
-            if (gui) {
-                QMetaObject::invokeMethod(gui, "appendLogMessage", 
-                    Qt::QueuedConnection, 
-                    Q_ARG(QString, QString("音频提取成功: %1 (大小: %2 字节)")
-                                         .arg(QString::fromStdString(audio_path))
-                                         .arg(file_size)));
+            // 验证输出音频格式
+            QString verify_cmd = QString("ffprobe -v quiet -show_format -show_streams \"%1\"")
+                                .arg(QString::fromStdString(audio_path));
+            QProcess verify_process;
+            verify_process.start(verify_cmd);
+            
+            if (verify_process.waitForFinished(5000) && verify_process.exitCode() == 0) {
+                QString verify_output = verify_process.readAllStandardOutput();
+                if (verify_output.contains("sample_rate=16000") && verify_output.contains("channels=1")) {
+                    if (gui) {
+                        QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                            Qt::QueuedConnection, 
+                            Q_ARG(QString, QString("✅ 音频提取成功: %1 (大小: %2 KB, 格式: 16kHz单声道PCM)")
+                                                 .arg(QString::fromStdString(audio_path))
+                                                 .arg(output_file_size / 1024)));
+                    }
+                } else {
+                    LOG_WARNING("输出音频格式可能不符合预期，但文件已创建");
+                }
             }
             
             extraction_success = true;
             
         } catch (const std::exception& e) {
             // 异步更新错误日志
-    if (gui) {
+            if (gui) {
                 QMetaObject::invokeMethod(gui, "appendLogMessage", 
                     Qt::QueuedConnection, 
-                    Q_ARG(QString, QString("音频提取失败: %1").arg(QString::fromStdString(e.what()))));
+                    Q_ARG(QString, QString("❌ 音频提取失败: %1").arg(QString::fromStdString(e.what()))));
             }
             extraction_success = false;
         }
@@ -791,6 +843,124 @@ bool AudioProcessor::extractAudioFromVideo(const std::string& video_path, const 
     return extraction_success.load();
 }
 
+// 音频流信息检测
+AudioProcessor::AudioStreamInfo AudioProcessor::detectAudioStreamInfo(const std::string& media_path) {
+    AudioStreamInfo info;
+    
+    QString probe_cmd = QString("ffprobe -v quiet -show_streams -select_streams a:0 -print_format json \"%1\"")
+                        .arg(QString::fromStdString(media_path));
+    
+    QProcess probe_process;
+    probe_process.start(probe_cmd);
+    
+    if (!probe_process.waitForFinished(10000)) { // 10秒超时
+        probe_process.kill();
+        LOG_WARNING("ffprobe timeout when detecting audio stream info");
+        return info;
+    }
+    
+    if (probe_process.exitCode() != 0) {
+        LOG_ERROR("ffprobe failed to analyze media file");
+        return info;
+    }
+    
+    QString probe_output = probe_process.readAllStandardOutput();
+    if (probe_output.isEmpty()) {
+        LOG_WARNING("ffprobe returned empty output");
+        return info;
+    }
+    
+    QJsonParseError error;
+    QJsonDocument doc = QJsonDocument::fromJson(probe_output.toUtf8(), &error);
+    
+    if (error.error != QJsonParseError::NoError) {
+        LOG_ERROR("Failed to parse ffprobe JSON output: " + error.errorString().toStdString());
+        return info;
+    }
+    
+    if (!doc.isObject()) {
+        LOG_ERROR("ffprobe output is not a valid JSON object");
+        return info;
+    }
+    
+    QJsonObject root = doc.object();
+    QJsonArray streams = root["streams"].toArray();
+    
+    for (const auto& stream_val : streams) {
+        QJsonObject stream = stream_val.toObject();
+        if (stream["codec_type"].toString() == "audio") {
+            info.has_audio = true;
+            info.codec = stream["codec_name"].toString();
+            info.sample_rate = stream["sample_rate"].toString().toInt();
+            info.channels = stream["channels"].toInt();
+            
+            // 记录检测到的音频信息
+            LOG_INFO("Detected audio stream: codec=" + info.codec.toStdString() + 
+                    ", sample_rate=" + std::to_string(info.sample_rate) + 
+                    ", channels=" + std::to_string(info.channels));
+            break;
+        }
+    }
+    
+    return info;
+}
+
+// 构建自适应FFmpeg命令
+QString AudioProcessor::buildAdaptiveFFmpegCommand(const std::string& input_path, 
+                                                  const std::string& output_path,
+                                                  const AudioStreamInfo& stream_info) {
+    QString base_cmd = QString("ffmpeg -i \"%1\" -vn -y").arg(QString::fromStdString(input_path));
+    QString audio_filters;
+    
+    // 检查是否已经是目标格式
+    bool needs_conversion = (stream_info.sample_rate != 16000 || stream_info.channels != 1);
+    
+    // 根据原始音频参数构建智能过滤器链
+    if (stream_info.has_audio && needs_conversion) {
+        // 智能重采样
+        if (stream_info.sample_rate > 16000) {
+            // 高质量降采样，使用SoX重采样器
+            audio_filters += "aresample=resampler=soxr:precision=28:cutoff=0.95:dither_method=triangular";
+        } else if (stream_info.sample_rate > 0 && stream_info.sample_rate < 16000) {
+            // 线性插值上采样
+            audio_filters += "aresample=resampler=linear";
+        }
+        
+        // 智能声道处理
+        if (stream_info.channels > 1) {
+            if (!audio_filters.isEmpty()) audio_filters += ",";
+            
+            if (stream_info.channels == 2) {
+                // 立体声到单声道的智能混音
+                audio_filters += "pan=mono|c0=0.5*c0+0.5*c1";
+            } else {
+                // 多声道混音到单声道
+                audio_filters += "pan=mono|c0=FC+0.5*FL+0.5*FR";
+            }
+        }
+        
+        // 轻微的音频增强（仅在需要转换时）
+        if (!audio_filters.isEmpty()) audio_filters += ",";
+        audio_filters += "volume=0.95";  // 轻微音量调整
+    }
+    
+    // 构建完整命令
+    QString ffmpeg_cmd;
+    if (!audio_filters.isEmpty()) {
+        ffmpeg_cmd = QString("%1 -af \"%2\" -acodec pcm_s16le -ar 16000 -ac 1 \"%3\"")
+                    .arg(base_cmd)
+                    .arg(audio_filters)
+                    .arg(QString::fromStdString(output_path));
+    } else {
+        // 简单格式转换（已经是16kHz单声道，只需要转换编码格式）
+        ffmpeg_cmd = QString("%1 -acodec pcm_s16le -ar 16000 -ac 1 \"%2\"")
+                    .arg(base_cmd)
+                    .arg(QString::fromStdString(output_path));
+    }
+    
+    return ffmpeg_cmd;
+}
+
 void AudioProcessor::startProcessing() {
     if (is_processing) {
         LOG_INFO("Audio processing already running");
@@ -804,6 +974,20 @@ void AudioProcessor::startProcessing() {
         
         // 清理推送缓存，防止新会话中出现重复推送
         clearPushCache();
+        
+        // 确保VAD检测器在处理开始前已正确初始化
+        if (!voice_detector) {
+            LOG_WARNING("VAD detector not initialized at processing start, attempting safe initialization");
+            if (!initializeVADSafely()) {
+                LOG_ERROR("Failed to initialize VAD detector during processing startup");
+                // 不要因为VAD初始化失败而阻止整个处理流程
+                // 记录警告并继续，使用默认阈值
+            } else {
+                LOG_INFO("VAD detector successfully initialized during processing startup");
+            }
+        } else {
+            LOG_INFO("VAD detector is available at processing start");
+        }
         
         // 重置自适应VAD，开始新的能量收集
         resetAdaptiveVAD();
@@ -1020,12 +1204,38 @@ void AudioProcessor::startProcessing() {
                 // 直接使用预加载的快速识别器，而不是移动它
                 // 这样可以避免潜在的GPU内存泄漏
                 LOG_INFO("即将使用预加载的快速识别器") ;
+                
+                // 确保VAD检测器已初始化，如果没有则使用默认阈值
+                float vad_threshold_value = vad_threshold; // 使用成员变量作为默认值
+                if (voice_detector) {
+                    try {
+                        vad_threshold_value = voice_detector->getThreshold();
+                        LOG_INFO("Using VAD threshold from detector: " + std::to_string(vad_threshold_value));
+                    } catch (const std::exception& e) {
+                        LOG_WARNING("Failed to get VAD threshold from detector, using default: " + std::string(e.what()));
+                        vad_threshold_value = vad_threshold;
+                    }
+                } else {
+                    LOG_WARNING("VAD detector not available, using default threshold: " + std::to_string(vad_threshold_value));
+                    // 尝试安全初始化VAD
+                    if (initializeVADSafely()) {
+                        LOG_INFO("VAD successfully initialized during processing start");
+                        if (voice_detector) {
+                            try {
+                                vad_threshold_value = voice_detector->getThreshold();
+                            } catch (...) {
+                                vad_threshold_value = vad_threshold;
+                            }
+                        }
+                    }
+                }
+                
                 fast_recognizer = std::make_unique<FastRecognizer>(
                     preloaded_fast_recognizer->getModelPath(),
                     nullptr,
                     current_language,
                     use_gpu,
-                    voice_detector->getThreshold());
+                    vad_threshold_value);
                 
                 if (gui) {
                     logMessage(gui, "Created fast recognizer based on preloaded model");
@@ -1040,8 +1250,34 @@ void AudioProcessor::startProcessing() {
                 if (gui) {
                     logMessage(gui, "Creating new fast recognizer (not preloaded): " + model_path);
                 }
+                
+                // 确保VAD检测器已初始化，如果没有则使用默认阈值
+                float vad_threshold_value = vad_threshold; // 使用成员变量作为默认值
+                if (voice_detector) {
+                    try {
+                        vad_threshold_value = voice_detector->getThreshold();
+                        LOG_INFO("Using VAD threshold from detector: " + std::to_string(vad_threshold_value));
+                    } catch (const std::exception& e) {
+                        LOG_WARNING("Failed to get VAD threshold from detector, using default: " + std::string(e.what()));
+                        vad_threshold_value = vad_threshold;
+                    }
+                } else {
+                    LOG_WARNING("VAD detector not available, using default threshold: " + std::to_string(vad_threshold_value));
+                    // 尝试安全初始化VAD
+                    if (initializeVADSafely()) {
+                        LOG_INFO("VAD successfully initialized during processing start");
+                        if (voice_detector) {
+                            try {
+                                vad_threshold_value = voice_detector->getThreshold();
+                            } catch (...) {
+                                vad_threshold_value = vad_threshold;
+                            }
+                        }
+                    }
+                }
+                
                 fast_recognizer = std::make_unique<FastRecognizer>(
-                    model_path, nullptr, current_language, use_gpu, voice_detector->getThreshold());
+                    model_path, nullptr, current_language, use_gpu, vad_threshold_value);
             }
         }
         
@@ -1586,21 +1822,44 @@ void AudioProcessor::setVADThreshold(float threshold) {
     // 更新阈值成员变量
     vad_threshold = threshold;
     
-    // 更新voice_detector对象
+    // 更新voice_detector对象 - 使用更安全的逻辑
     if (!voice_detector) {
-        voice_detector = std::make_unique<VoiceActivityDetector>(threshold);
+        LOG_INFO("VAD detector not initialized, attempting safe initialization");
+        if (!initializeVADSafely()) {
+            LOG_WARNING("VAD初始化失败，阈值已更新但VAD不可用");
+            if (gui) {
+                logMessage(gui, "VAD threshold updated to: " + std::to_string(threshold) + " (VAD unavailable)");
+            }
+            return;
+        }
+    }
+    
+    // 安全更新阈值
+    if (voice_detector) {
+        try {
+            voice_detector->setThreshold(threshold);
+            LOG_INFO("VAD threshold updated successfully: " + std::to_string(threshold));
+            
+            if (gui) {
+                logMessage(gui, "VAD threshold set to: " + std::to_string(threshold));
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("VAD阈值设置失败: " + std::string(e.what()));
+            if (gui) {
+                logMessage(gui, "Failed to set VAD threshold: " + std::string(e.what()), true);
+            }
+        }
     } else {
-        voice_detector->setThreshold(threshold);
+        LOG_WARNING("VAD检测器不可用，无法设置阈值");
+        if (gui) {
+            logMessage(gui, "VAD detector unavailable, threshold not applied", true);
+        }
     }
     
     // 更新识别器的VAD阈值 - 如果有setVADThreshold方法则可以直接调用
     if (fast_recognizer) {
         // 如果FastRecognizer支持updateVADThreshold方法
         // fast_recognizer->updateVADThreshold(voice_detector->getThreshold());
-    }
-    
-    if (gui) {
-        logMessage(gui, "VAD threshold set to: " + std::to_string(voice_detector->getThreshold()));
     }
 }
 
@@ -1788,8 +2047,8 @@ void AudioProcessor::onSegmentReady(const AudioSegment& segment) {
     
     // 检查是否为空的最后段标记
     if (segment.is_last && segment.filepath.empty()) {
-        LOG_INFO("收到空的最后段标记，启动延迟处理以等待之前音频段的识别结果");
-        startFinalSegmentDelayProcessing();
+                        LOG_INFO("Received empty final segment marker, starting delay processing to wait for previous audio segment recognition results");
+                startFinalSegmentDelayProcessing();
         return;
     }
     
@@ -1816,7 +2075,7 @@ void AudioProcessor::onSegmentReady(const AudioSegment& segment) {
     if (audio_data.empty()) {
         // 如果是最后一段且音频数据为空，说明可能是因为处理的音频段太短
         if (segment.is_last) {
-            LOG_INFO("最后一段音频数据为空，启动延迟处理");
+            LOG_INFO("Final segment audio data is empty, starting delay processing");
             startFinalSegmentDelayProcessing();
         } else {
             LOG_WARNING("音频段数据为空，跳过处理: " + segment.filepath);
@@ -2240,7 +2499,7 @@ void AudioProcessor::processBufferForMicrophone(const AudioBuffer& buffer) {
 
 void AudioProcessor::processBufferForFile(const AudioBuffer& buffer) {
     // 单线程模式：直接处理每个缓冲区，不使用批次累积
-    LOG_INFO("单线程处理文件缓冲区");
+    //LOG_INFO("单线程处理文件缓冲区");
     
     // 检查是否是最后一个缓冲区
     if (buffer.is_last) {
@@ -2341,7 +2600,7 @@ void AudioProcessor::processBufferForFile(const AudioBuffer& buffer) {
             }
         }
         
-        LOG_INFO("文件缓冲区发送到基于VAD的实时分段处理器");
+       //LOG_INFO("文件缓冲区发送到基于VAD的实时分段处理器");
         segment_handler->addBuffer(processed_buffer);
         
         // 修复：当使用实时分段处理器时，不要重复添加到audio_queue
@@ -2748,11 +3007,6 @@ void AudioProcessor::initializeParameters() {
         voice_detector->setThreshold(adaptive_threshold);  // 使用自适应阈值
     }
     
-    // 同样确保voice_detector已正确初始化，避免重复创建
-    if (voice_detector) {
-        voice_detector->setThreshold(adaptive_threshold);
-        voice_detector->setVADMode(2);  // 使用质量模式
-    }
     
     // 设置音频预处理参数 - 重新启用预处理但使用更保守的设置
     if (audio_preprocessor) {
@@ -2811,7 +3065,7 @@ std::vector<float> AudioProcessor::preprocessAudioBuffer(const std::vector<float
     
     // 确保VAD检测器已正确初始化
     if (!voice_detector) {
-        LOG_INFO("VAD detector not initialized, skipping adaptive VAD threshold update");
+        //LOG_INFO("VAD detector not initialized, skipping adaptive VAD threshold update");
         return audio_buffer;  // 返回原始缓冲区，避免访问空指针
     }
     
@@ -3008,9 +3262,12 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
         }
         
         // 添加网络超时设置 - 使用动态超时
+        int dynamic_timeout = calculateDynamicTimeout(file_size);
         QTimer* timeoutTimer = new QTimer();
         timeoutTimer->setSingleShot(true);
-        timeoutTimer->start(30000); // 30秒超时
+        timeoutTimer->start(dynamic_timeout);
+        
+        LOG_INFO("Set dynamic timeout: " + std::to_string(dynamic_timeout/1000) + " seconds for file size: " + std::to_string(file_size) + " bytes");
         
         // 构建服务器URL
         QString serverUrl = QString::fromStdString(precise_server_url + "/recognize");
@@ -3152,7 +3409,7 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
             
             // 检查是否应该重试
             if (shouldRetryRequest(request_id, QNetworkReply::TimeoutError)) {
-                LOG_INFO("超时后准备重试请求 " + std::to_string(request_id));
+                LOG_INFO("Preparing to retry request after timeout: " + std::to_string(request_id));
                 
                 // 取消当前请求
                 if (safeReply && !safeReply.isNull()) {
@@ -3304,21 +3561,21 @@ void AudioProcessor::handlePreciseServerReply(QNetworkReply* reply) {
     auto now = std::chrono::system_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - request_time).count();
     
-    LOG_INFO("收到精确识别服务器响应，请求ID: " + std::to_string(request_id) + 
-             ", 耗时: " + std::to_string(elapsed) + "ms");
+    LOG_INFO("Received precise recognition server response, request ID: " + std::to_string(request_id) + 
+             ", elapsed: " + std::to_string(elapsed) + "ms");
     
     if (reply->error() == QNetworkReply::NoError) {
         // 读取响应数据
         QByteArray responseData = reply->readAll();
-        LOG_INFO("服务器响应内容: " + QString(responseData).toStdString());
+        LOG_INFO("Server response content: " + QString(responseData).toStdString());
         
         // 获取HTTP状态码
         int httpStatusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        LOG_INFO("HTTP状态码: " + std::to_string(httpStatusCode));
+        LOG_INFO("HTTP status code: " + std::to_string(httpStatusCode));
         
         // 获取内容类型
         QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
-        LOG_INFO("内容类型: " + contentType.toStdString());
+        LOG_INFO("Content type: " + contentType.toStdString());
         
         // 解析JSON响应
         QJsonDocument jsonResponse = QJsonDocument::fromJson(responseData);
@@ -3327,19 +3584,19 @@ void AudioProcessor::handlePreciseServerReply(QNetworkReply* reply) {
         
         if (jsonResponse.isObject()) {
             QJsonObject jsonObject = jsonResponse.object();
-            LOG_INFO("JSON对象包含以下键: " + 
+            LOG_INFO("JSON object contains keys: " + 
                      QString(QJsonDocument(jsonObject).toJson(QJsonDocument::Compact)).toStdString());
             
             if (jsonObject.contains("success")) {
                 success = jsonObject["success"].toBool();
-                LOG_INFO("success字段: " + std::string(success ? "true" : "false"));
+                LOG_INFO("success field: " + std::string(success ? "true" : "false"));
             }
             
             if (success && jsonObject.contains("text")) {
                 result = jsonObject["text"].toString();
-                LOG_INFO("精确识别成功，请求ID: " + std::to_string(request_id) + 
-                        ", 处理时间: " + std::to_string(elapsed) + "ms");
-                LOG_INFO("识别结果文本: " + result.toStdString());
+                LOG_INFO("Precise recognition successful, request ID: " + std::to_string(request_id) + 
+                        ", processing time: " + std::to_string(elapsed) + "ms");
+                LOG_INFO("Recognition result text: " + result.toStdString());
                 
                 // 检查语言字段
                 QString language = "auto";
@@ -4464,8 +4721,8 @@ void AudioProcessor::updateAdaptiveVADThreshold(const std::vector<float>& audio_
         energy_history.push_back(current_energy);
         energy_samples_collected += audio_data.size();
         
-        // 每收集10秒的数据就更新一次进度日志
-        if (sample_rate > 0 && energy_samples_collected % (sample_rate * 10) == 0) {
+        // 每收集30秒的数据就更新一次进度日志（减少频繁输出）
+        if (sample_rate > 0 && energy_samples_collected % (sample_rate * 30) == 0) {
             float progress = (float)energy_samples_collected / target_energy_samples * 100.0f;
             LOG_INFO("Adaptive VAD threshold collection progress: " + std::to_string(progress) + "%");
         }
@@ -4556,7 +4813,7 @@ void AudioProcessor::resetAdaptiveVAD() {
     if (gui) {
         QMetaObject::invokeMethod(gui, "appendLogMessage", 
             Qt::QueuedConnection, 
-            Q_ARG(QString, QString("自适应VAD已重置，将重新收集基础能量数据")));
+            Q_ARG(QString, QString("Adaptive VAD has been reset, re-collecting base energy data")));
     }
 }
 
@@ -4862,8 +5119,8 @@ int AudioProcessor::calculateDynamicTimeout(qint64 file_size_bytes) {
     const int max_timeout = 5 * 60 * 1000; // 5分钟
     estimated_timeout = std::min(estimated_timeout, max_timeout);
     
-    LOG_INFO("文件大小: " + std::to_string(file_size_bytes) + " 字节, 计算超时时间: " + 
-             std::to_string(estimated_timeout) + " 毫秒");
+        LOG_INFO("File size: " + std::to_string(file_size_bytes) + " bytes, calculated timeout: " +
+             std::to_string(estimated_timeout) + " ms");
     
     return estimated_timeout;
 }
@@ -5056,66 +5313,72 @@ void AudioProcessor::createMediaPlayerSafely() {
 
 // 延迟初始化VAD实例（在Qt multimedia完全初始化后调用）
 bool AudioProcessor::initializeVADSafely() {
-    LOG_INFO("开始安全初始化VAD实例...");
+            LOG_INFO("Starting safe VAD instance initialization...");
     
     try {
         // 检查是否已经初始化
         if (voice_detector && voice_detector->isVADInitialized()) {
-            LOG_INFO("VAD已经初始化，跳过重复初始化");
+            LOG_INFO("VAD already initialized, skipping duplicate initialization");
             return true;
         }
         
         // 在Qt multimedia完全初始化后，现在可以安全地创建VAD
-        LOG_INFO("Qt multimedia已就绪，开始创建VAD实例");
+        LOG_INFO("Qt multimedia ready, starting VAD instance creation");
         
-        // 检查VAD库状态
-        if (!VoiceActivityDetector::checkVADLibraryState()) {
-            LOG_ERROR("VAD库状态检查失败，无法初始化");
-            return false;
+        // 检查VAD库状态（不阻塞，如果失败就使用默认创建）
+        bool library_check = VoiceActivityDetector::checkVADLibraryState();
+        if (!library_check) {
+            LOG_WARNING("VAD library status check failed, but will continue attempting creation");
         }
         
         // 创建VoiceActivityDetector实例
         try {
             voice_detector = std::make_unique<VoiceActivityDetector>(vad_threshold);
             if (!voice_detector) {
-                LOG_ERROR("VoiceActivityDetector创建失败");
+                LOG_ERROR("VoiceActivityDetector creation failed");
                 return false;
             }
             
-            // 验证VAD是否真正初始化成功
-            if (!voice_detector->isVADInitialized()) {
-                LOG_ERROR("VoiceActivityDetector创建成功但VAD核心未初始化");
-                voice_detector.reset();
-                return false;
+            LOG_INFO("VoiceActivityDetector created successfully");
+            
+            // 验证VAD是否初始化成功 - 使用更宽容的检查
+            bool vad_initialized = voice_detector->isVADInitialized();
+            if (!vad_initialized) {
+                LOG_WARNING("VAD core initialization may have issues, but object created, will try to continue using");
+                // 不再重置voice_detector，而是继续使用
+            } else {
+                LOG_INFO("VAD core initialization verification successful");
             }
             
-            LOG_INFO("VoiceActivityDetector创建成功");
+            // 尝试配置VAD参数（即使初始化检查失败也要尝试）
+            try {
+                voice_detector->setVADMode(3);  // 使用最敏感模式
+                voice_detector->setThreshold(vad_threshold);
+                LOG_INFO("VAD instance configuration successful");
+            } catch (const std::exception& e) {
+                LOG_WARNING("VAD parameter configuration failed but instance exists: " + std::string(e.what()));
+                // 不因为配置失败就放弃使用VAD
+            }
             
-            // 配置VAD参数
-            voice_detector->setVADMode(3);  // 使用最敏感模式
-            voice_detector->setThreshold(vad_threshold);
-            
-            LOG_INFO("VAD实例配置成功 - VAD实例已就绪");
-            
-            LOG_INFO("VAD参数配置完成");
+            LOG_INFO("VAD parameter configuration completed");
             
         } catch (const std::exception& e) {
-            LOG_ERROR("创建VoiceActivityDetector时发生异常: " + std::string(e.what()));
+            LOG_ERROR("Exception occurred while creating VoiceActivityDetector: " + std::string(e.what()));
             return false;
         } catch (...) {
-            LOG_ERROR("创建VoiceActivityDetector时发生未知异常");
+            LOG_ERROR("Unknown exception occurred while creating VoiceActivityDetector");
             return false;
         }
         
-        LOG_INFO("VAD实例安全初始化完成");
+        LOG_INFO("VAD instance safe initialization completed");
         return true;
         
     } catch (const std::exception& e) {
-        LOG_ERROR("VAD安全初始化异常: " + std::string(e.what()));
+        LOG_ERROR("VAD safe initialization exception: " + std::string(e.what()));
         return false;
         
     } catch (...) {
-        LOG_ERROR("VAD安全初始化未知异常");
+        LOG_ERROR("VAD safe initialization unknown exception");
         return false;
     }
 }
@@ -5127,31 +5390,31 @@ bool AudioProcessor::isVADInitialized() const {
 
 // 启动最后段延迟处理，确保最后一个音频段的识别结果有足够时间返回
 void AudioProcessor::startFinalSegmentDelayProcessing() {
-    LOG_INFO("开始最后段延迟处理，等待识别结果返回");
+    LOG_INFO("Starting final segment delay processing, waiting for recognition results");
     
     // 在单独的线程中执行延迟等待，避免阻塞主线程
     std::thread delay_thread([this]() {
         try {
             auto start_time = std::chrono::steady_clock::now();
-            const int total_delay_seconds = 8;  // 总延迟8秒
-            const int check_interval_ms = 100;  // 每100毫秒检查一次
+            const int total_delay_seconds = 10;  // 增加延迟到10秒，给更多时间
+            const int check_interval_ms = 200;  // 减少检查频率到200毫秒
             int logged_seconds = 0;
             
-            LOG_INFO("最后段延迟处理：开始等待最多" + std::to_string(total_delay_seconds) + "秒");
+            LOG_INFO("Final segment delay processing: starting to wait up to " + std::to_string(total_delay_seconds) + " seconds");
             
             for (int elapsed_ms = 0; elapsed_ms < total_delay_seconds * 1000; elapsed_ms += check_interval_ms) {
                 // 检查是否还在处理中
                 if (!is_processing) {
-                    LOG_INFO("最后段延迟处理：处理已停止，提前结束延迟");
+                    LOG_INFO("Final segment delay processing: processing stopped, ending delay early");
                     break;
                 }
                 
-                // 每秒记录一次进度
+                // 每2秒记录一次进度（减少日志频率）
                 int current_seconds = elapsed_ms / 1000;
-                if (current_seconds > logged_seconds) {
+                if (current_seconds > logged_seconds && current_seconds % 2 == 0) {
                     logged_seconds = current_seconds;
-                    LOG_INFO("最后段延迟处理：等待中... " + std::to_string(current_seconds) + "/" + 
-                           std::to_string(total_delay_seconds) + "秒");
+                    LOG_INFO("Final segment delay processing: waiting... " + std::to_string(current_seconds) + "/" + 
+                           std::to_string(total_delay_seconds) + " seconds");
                 }
                 
                 // 检查是否有活跃的识别请求
@@ -5162,8 +5425,8 @@ void AudioProcessor::startFinalSegmentDelayProcessing() {
                     std::unique_lock<std::mutex> lock(active_requests_mutex, std::try_to_lock);
                     if (lock.owns_lock()) {
                         has_active_requests = !active_requests.empty();
-                        if (has_active_requests) {
-                            LOG_INFO("最后段延迟处理：发现活跃请求 " + std::to_string(active_requests.size()) + " 个，继续等待");
+                        if (has_active_requests && current_seconds % 3 == 0) {  // 每3秒记录一次活跃请求
+                            LOG_INFO("Final segment delay processing: found " + std::to_string(active_requests.size()) + " active requests, continuing to wait");
                         }
                     }
                 }
@@ -5172,8 +5435,8 @@ void AudioProcessor::startFinalSegmentDelayProcessing() {
                 bool has_fast_results = false;
                 if (fast_results) {
                     has_fast_results = !fast_results->empty();
-                    if (has_fast_results) {
-                        LOG_INFO("最后段延迟处理：发现快速识别结果待处理，继续等待");
+                    if (has_fast_results && current_seconds % 3 == 0) {  // 每3秒记录一次
+                        LOG_INFO("Final segment delay processing: found fast recognition results pending, continuing to wait");
                     }
                 }
                 
@@ -5185,9 +5448,9 @@ void AudioProcessor::startFinalSegmentDelayProcessing() {
                     has_active_segments = true;  // 保守估计
                 }
                 
-                // 如果没有任何活跃的处理，可以提前结束
-                if (!has_active_requests && !has_fast_results && !has_active_segments && elapsed_ms > 2000) {
-                    LOG_INFO("最后段延迟处理：未发现活跃处理，延迟" + std::to_string(elapsed_ms) + "ms后提前结束");
+                // 如果没有任何活跃的处理，可以提前结束（但要等待至少3秒）
+                if (!has_active_requests && !has_fast_results && !has_active_segments && elapsed_ms > 3000) {
+                    LOG_INFO("Final segment delay processing: no active processing found, ending early after " + std::to_string(elapsed_ms) + "ms");
                     break;
                 }
                 
@@ -5198,20 +5461,20 @@ void AudioProcessor::startFinalSegmentDelayProcessing() {
             auto end_time = std::chrono::steady_clock::now();
             auto actual_delay = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
             
-            LOG_INFO("最后段延迟处理完成，实际等待时间：" + std::to_string(actual_delay) + "ms");
+            LOG_INFO("Final segment delay processing completed, actual wait time: " + std::to_string(actual_delay) + "ms");
             
             // 延迟处理完成后，确保处理状态正确设置
             if (is_processing) {
-                LOG_INFO("最后段延迟处理：延迟完成，设置处理完全停止");
+                LOG_INFO("Final segment delay processing: delay completed, setting processing fully stopped");
                 QMetaObject::invokeMethod(this, [this]() {
                     emit processingFullyStopped();
                 }, Qt::QueuedConnection);
             }
             
         } catch (const std::exception& e) {
-            LOG_ERROR("最后段延迟处理异常: " + std::string(e.what()));
+            LOG_ERROR("Final segment delay processing exception: " + std::string(e.what()));
         } catch (...) {
-            LOG_ERROR("最后段延迟处理遇到未知异常");
+            LOG_ERROR("Final segment delay processing encountered unknown exception");
         }
     });
     

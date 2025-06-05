@@ -50,13 +50,20 @@ WhisperGUI::WhisperGUI(QWidget* parent)
       logOutput(nullptr),
       finalOutput(nullptr),
       currentFilePath(""),
+      currentStreamUrl(""),
       mediaPlayer(nullptr),
       audioOutput(nullptr),
       positionTimer(nullptr),
       videoWidget(nullptr),
       subtitleLabel(nullptr),
       subtitleManager(nullptr),
-      audioProcessor(nullptr) {
+      audioProcessor(nullptr),
+      streamValidator(nullptr),
+      streamValidationTimer(nullptr),
+      streamUrlLabel(nullptr),
+      streamUrlEdit(nullptr),
+      streamValidationProgress(nullptr),
+      streamStatusLabel(nullptr) {
     
     // 设置命令行编码为UTF-8
     #ifdef _WIN32
@@ -230,11 +237,36 @@ void WhisperGUI::setupUI() {
     mediaLayout->addLayout(playbackControls);
     mainLayout->addLayout(mediaLayout);
     
+    // 添加流输入区域到主布局
+    mainLayout->addLayout(streamLayout);
+    
     // 控制按钮区域
     controlsLayout = new QHBoxLayout();
     startButton = new QPushButton("Start Recording", this);
     stopButton = new QPushButton("Stop", this);
     fileButton = new QPushButton("Select File", this);
+    
+    // 视频流输入区域
+    QVBoxLayout* streamLayout = new QVBoxLayout();
+    streamUrlLabel = new QLabel("Video Stream URL:", this);
+    streamUrlEdit = new QLineEdit(this);
+    streamUrlEdit->setPlaceholderText("Enter stream URL (e.g., rtmp://server/stream or http://server/stream.m3u8)");
+    streamUrlEdit->setMinimumWidth(300);
+    
+    streamValidationProgress = new QProgressBar(this);
+    streamValidationProgress->setVisible(false);
+    streamValidationProgress->setMaximumHeight(5);
+    
+    streamStatusLabel = new QLabel("Enter stream URL to begin", this);
+    streamStatusLabel->setStyleSheet("QLabel { color: gray; font-size: 10px; }");
+    
+    QHBoxLayout* streamInputLayout = new QHBoxLayout();
+    streamInputLayout->addWidget(streamUrlLabel);
+    streamInputLayout->addWidget(streamUrlEdit);
+    
+    streamLayout->addLayout(streamInputLayout);
+    streamLayout->addWidget(streamValidationProgress);
+    streamLayout->addWidget(streamStatusLabel);
     languageCombo = new QComboBox(this);
     targetLanguageCombo = new QComboBox(this);
     dualLanguageCheck = new QCheckBox("Dual Language Output", this);
@@ -509,6 +541,30 @@ void WhisperGUI::setupConnections() {
     // 连接识别模式下拉框
     connect(recognitionModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), 
             this, &WhisperGUI::onRecognitionModeChanged);
+    
+    // 视频流输入连接
+    if (streamUrlEdit) {
+        connect(streamUrlEdit, &QLineEdit::editingFinished, this, &WhisperGUI::onStreamUrlChanged);
+        connect(streamUrlEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
+            if (text.isEmpty()) {
+                streamStatusLabel->setText("Enter stream URL to begin");
+                streamStatusLabel->setStyleSheet("QLabel { color: gray; font-size: 10px; }");
+            }
+        });
+    }
+    
+    // 初始化流验证器
+    streamValidator = new QNetworkAccessManager(this);
+    streamValidationTimer = new QTimer(this);
+    streamValidationTimer->setSingleShot(true);
+    streamValidationTimer->setInterval(3000); // 3秒延迟验证
+    connect(streamValidationTimer, &QTimer::timeout, this, &WhisperGUI::validateStreamConnection);
+    
+    // 初始化位置定时器（之前可能遗漏了）
+    if (!positionTimer) {
+        positionTimer = new QTimer(this);
+        positionTimer->setInterval(100); // 100ms间隔更新
+    }
 }
 
 void WhisperGUI::onStartButtonClicked() {

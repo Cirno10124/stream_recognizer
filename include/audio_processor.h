@@ -469,4 +469,17 @@ private:
     int calculateDynamicTimeout(qint64 file_size_bytes);
     bool shouldRetryRequest(int request_id, QNetworkReply::NetworkError error);
     void retryRequest(int request_id);
+    
+    // 音频流自适应检测和优化
+    struct AudioStreamInfo {
+        QString codec;
+        int sample_rate = 0;
+        int channels = 0;
+        bool has_audio = false;
+    };
+    
+    AudioStreamInfo detectAudioStreamInfo(const std::string& media_path);
+    QString buildAdaptiveFFmpegCommand(const std::string& input_path, 
+                                      const std::string& output_path,
+                                      const AudioStreamInfo& stream_info);
 };

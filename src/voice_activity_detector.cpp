@@ -51,43 +51,58 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
         // 创建VAD实例，使用重试机制
         int retry_count = 0;
         const int max_retries = 3;
+        bool configuration_success = false;
         
-        while (retry_count < max_retries && !vad_instance) {
+        while (retry_count < max_retries && !configuration_success) {
             std::cout << "[VAD] 尝试创建WebRTC VAD实例 (第 " << (retry_count + 1) << " 次)..." << std::endl;
             
-            vad_instance = safeCreateVADInstance();
+            if (!vad_instance) {
+                vad_instance = safeCreateVADInstance();
+            }
             
             if (vad_instance) {
                 std::cout << "[VAD] WebRTC VAD实例创建成功，地址: " << vad_instance << std::endl;
                 
-                // 验证实例有效性
-                if (fvad_set_mode(vad_instance, vad_mode) < 0) {
-                    std::cerr << "[VAD] 设置VAD模式失败，释放实例" << std::endl;
-                    fvad_free(vad_instance);
-                    vad_instance = nullptr;
-                    retry_count++;
-                    continue;
+                // 验证实例有效性 - 使用更宽容的策略
+                int mode_result = fvad_set_mode(vad_instance, vad_mode);
+                if (mode_result < 0) {
+                    std::cerr << "[VAD] 设置VAD模式失败，尝试默认模式" << std::endl;
+                    // 尝试使用默认模式 (0)
+                    mode_result = fvad_set_mode(vad_instance, 0);
+                    if (mode_result >= 0) {
+                        vad_mode = 0;  // 更新为实际使用的模式
+                        std::cout << "[VAD] 使用默认VAD模式 (0)" << std::endl;
+                    }
                 }
                 
-                if (fvad_set_sample_rate(vad_instance, 16000) < 0) {
-                    std::cerr << "[VAD] 设置采样率失败，释放实例" << std::endl;
-                    fvad_free(vad_instance);
-                    vad_instance = nullptr;
-                    retry_count++;
-                    continue;
+                int rate_result = fvad_set_sample_rate(vad_instance, 16000);
+                if (rate_result < 0) {
+                    std::cerr << "[VAD] 设置16kHz采样率失败，尝试8kHz" << std::endl;
+                    // 尝试使用8kHz采样率
+                    rate_result = fvad_set_sample_rate(vad_instance, 8000);
+                    if (rate_result >= 0) {
+                        std::cout << "[VAD] 使用8kHz采样率作为回退" << std::endl;
+                    }
                 }
                 
-                std::cout << "[VAD] VAD配置设置成功 (模式: " << vad_mode << ", 采样率: 16000Hz)" << std::endl;
-                break; // 成功创建并配置
+                // 只要其中一个配置成功，就认为可以使用
+                if (mode_result >= 0 || rate_result >= 0) {
+                    std::cout << "[VAD] VAD配置成功 (模式: " << vad_mode << ")" << std::endl;
+                    configuration_success = true;
+                    break; // 成功创建并配置
+                } else {
+                    std::cerr << "[VAD] VAD配置完全失败，准备重试" << std::endl;
+                    // 不立即销毁实例，先尝试下一次配置
+                }
                 
             } else {
-                retry_count++;
-                std::cerr << "[VAD] WebRTC VAD创建失败 (尝试 " << retry_count << "/" << max_retries << ")" << std::endl;
-                
-                if (retry_count < max_retries) {
-                    // 等待一小段时间后重试
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
+                std::cerr << "[VAD] WebRTC VAD创建失败 (尝试 " << (retry_count + 1) << "/" << max_retries << ")" << std::endl;
+            }
+            
+            retry_count++;
+            if (!configuration_success && retry_count < max_retries) {
+                // 等待一小段时间后重试
+                std::this_thread::sleep_for(std::chrono::milliseconds(50 * retry_count));
             }
         }
         
@@ -96,27 +111,31 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
             throw std::runtime_error("Failed to create WebRTC VAD after " + std::to_string(max_retries) + " attempts");
         }
         
-        std::cout << "[VAD] WebRTC VAD初始化完全成功" << std::endl;
+        if (!configuration_success) {
+            std::cerr << "[VAD] 警告：VAD配置部分失败，但实例存在，将继续运行" << std::endl;
+        }
+        
+        std::cout << "[VAD] WebRTC VAD初始化完成" << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "[VAD] 初始化异常: " << e.what() << std::endl;
         
-        // 清理部分创建的资源
-        if (vad_instance) {
-            fvad_free(vad_instance);
-            vad_instance = nullptr;
+        // 更宽容的错误处理 - 不立即销毁实例
+        // 如果实例存在，即使配置有问题也保留它
+        if (!vad_instance) {
+            std::cerr << "[VAD] VAD实例创建失败，将使用回退处理" << std::endl;
+        } else {
+            std::cerr << "[VAD] VAD实例存在但配置可能有问题，将继续使用" << std::endl;
         }
-        
-        // 记录失败但不抛出异常，允许对象创建完成
-        std::cerr << "[VAD] VAD初始化失败，将使用回退处理" << std::endl;
         
     } catch (...) {
         std::cerr << "[VAD] 初始化未知异常" << std::endl;
         
-        // 清理资源
-        if (vad_instance) {
-            fvad_free(vad_instance);
-            vad_instance = nullptr;
+        // 保守的处理：如果实例存在就保留
+        if (!vad_instance) {
+            std::cerr << "[VAD] VAD实例创建失败" << std::endl;
+        } else {
+            std::cerr << "[VAD] VAD实例存在，将尝试继续使用" << std::endl;
         }
     }
 }
@@ -580,5 +599,33 @@ Fvad* VoiceActivityDetector::safeCreateVADInstance() {
 
 // 检查VAD实例是否已正确初始化
 bool VoiceActivityDetector::isVADInitialized() const {
-    return (vad_instance != nullptr);
+    if (!vad_instance) {
+        return false;
+    }
+    
+    // 执行更详细的检查，验证VAD实例是否真正可用
+    try {
+        // 尝试一个简单的测试：创建测试数据并检查VAD是否响应
+        std::vector<int16_t> test_data(320, 0);  // 320个样本的静音数据
+        
+        // 如果VAD实例有效，这个调用应该成功并返回0或正数
+        int test_result = fvad_process(vad_instance, test_data.data(), 320);
+        
+        // 返回值 >= 0 表示VAD工作正常，-1表示错误
+        bool is_working = (test_result >= 0);
+        
+        if (!is_working) {
+            std::cerr << "[VAD] VAD实例测试失败，返回值: " << test_result << std::endl;
+        }
+        
+        return is_working;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "[VAD] VAD实例测试异常: " << e.what() << std::endl;
+        return false;
+        
+    } catch (...) {
+        std::cerr << "[VAD] VAD实例测试未知异常" << std::endl;
+        return false;
+    }
 } 
