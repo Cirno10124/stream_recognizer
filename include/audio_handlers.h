@@ -49,12 +49,15 @@ private:
     // 分段处理回调
     void onSegmentReady(const AudioSegment& segment);
     
-    // 单线程模式：在当前线程中处理音频
-    void processAudioInCurrentThread(void* stream, int frames_per_buffer, int sample_rate);
+    // 异步线程模式：在独立线程中处理音频
+    void processAudioInThread(void* stream, int frames_per_buffer, int sample_rate);
     
     // 成员变量
     AudioQueue* queue;
     std::atomic<bool> running{false};
+    
+    // 线程管理
+    std::unique_ptr<std::thread> processing_thread;
     
     // 实时分段相关
     bool segmentation_enabled{false};
@@ -86,10 +89,14 @@ public:
     void stop();
     bool is_active() const;
     
+    // 检查文件是否已完全处理完成（包括最后段处理）
+    bool isFullyCompleted() const;
+    
 private:
     AudioQueue* queue{nullptr};
     std::string file_path;
     std::atomic<bool> is_running{false};
+    std::atomic<bool> fully_completed{false}; // 完全处理完成标志
     std::thread process_thread;
     bool fast_mode{false};
     std::atomic<qint64> current_position{0}; // 当前播放位置，毫秒

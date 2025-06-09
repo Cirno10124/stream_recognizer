@@ -61,6 +61,13 @@ add_executable(recognizer_server ${SOURCES})
 # 查找CUDA库
 find_package(CUDAToolkit REQUIRED)
 
+# 查找cpp-httplib库 (方法1: 使用pkg-config)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(HTTPLIB REQUIRED cpp-httplib)
+
+# 备用方法: 直接指定库文件 (如果上面的方法不工作，注释掉上面3行，启用下面这行)
+# set(HTTPLIB_LIBRARIES cpp-httplib)
+
 # 链接库
 target_link_libraries(recognizer_server PRIVATE
     ${WHISPER_LIBRARY}
@@ -68,6 +75,7 @@ target_link_libraries(recognizer_server PRIVATE
     ${GGML_BASE_LIBRARY}
     ${GGML_CPU_LIBRARY}
     ${GGML_CUDA_LIBRARY}
+    ${HTTPLIB_LIBRARIES}
     pthread
     m
     CUDA::cudart
@@ -81,6 +89,10 @@ target_link_directories(recognizer_server PRIVATE
     /usr/local/cuda/lib64
     /usr/lib/x86_64-linux-gnu
 )
+
+# 添加cpp-httplib的包含目录和链接目录
+target_include_directories(recognizer_server PRIVATE ${HTTPLIB_INCLUDE_DIRS})
+target_link_directories(recognizer_server PRIVATE ${HTTPLIB_LIBRARY_DIRS})
 
 # 复制配置文件
 configure_file(
@@ -102,5 +114,6 @@ message(STATUS "CUDA architecture: ${CMAKE_CUDA_ARCHITECTURES}")
 # 添加运行时路径设置
 set_target_properties(recognizer_server PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE
-    INSTALL_RPATH "/home/chess/recognizer_server/3rd_party/whisper.cpp/build/src:/home/chess/recognizer_server/3rd_party/whisper.cpp/build/ggml/src:/home/chess/recognizer_server/3rd_party/whisper.cpp/build/ggml/src/ggml-cuda"
+    INSTALL_RPATH "$ORIGIN/../3rd_party/whisper.cpp/build/src:$ORIGIN/../3rd_party/whisper.cpp/build/ggml/src:$ORIGIN/../3rd_party/whisper.cpp/build/ggml/src/ggml-cuda"
+    INSTALL_RPATH_USE_LINK_PATH TRUE
 )

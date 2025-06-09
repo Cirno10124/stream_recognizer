@@ -36,6 +36,7 @@
 #include <QLineEdit>
 #include <QGroupBox>
 #include <QSizePolicy>
+#include <QProgressBar>
 //#include <subtitle_manager.h>
 //#include <consoleapi2.h>
 //#include <WinNls.h>
@@ -237,9 +238,6 @@ void WhisperGUI::setupUI() {
     mediaLayout->addLayout(playbackControls);
     mainLayout->addLayout(mediaLayout);
     
-    // 添加流输入区域到主布局
-    mainLayout->addLayout(streamLayout);
-    
     // 控制按钮区域
     controlsLayout = new QHBoxLayout();
     startButton = new QPushButton("Start Recording", this);
@@ -250,7 +248,7 @@ void WhisperGUI::setupUI() {
     QVBoxLayout* streamLayout = new QVBoxLayout();
     streamUrlLabel = new QLabel("Video Stream URL:", this);
     streamUrlEdit = new QLineEdit(this);
-    streamUrlEdit->setPlaceholderText("Enter stream URL (e.g., rtmp://server/stream or http://server/stream.m3u8)");
+            streamUrlEdit->setPlaceholderText("Enter stream URL (e.g., http://server/stream.m3u8, rtmp://server/stream, or file:///path/to/file.m3u8)");
     streamUrlEdit->setMinimumWidth(300);
     
     streamValidationProgress = new QProgressBar(this);
@@ -267,6 +265,10 @@ void WhisperGUI::setupUI() {
     streamLayout->addLayout(streamInputLayout);
     streamLayout->addWidget(streamValidationProgress);
     streamLayout->addWidget(streamStatusLabel);
+    
+    // 添加流输入区域到主布局
+    mainLayout->addLayout(streamLayout);
+    
     languageCombo = new QComboBox(this);
     targetLanguageCombo = new QComboBox(this);
     dualLanguageCheck = new QCheckBox("Dual Language Output", this);
@@ -277,8 +279,10 @@ void WhisperGUI::setupUI() {
     recognitionModeCombo = new QComboBox(this);
     recognitionModeCombo->addItem("Fast Recognition (Local, Real-time, Lower accuracy)");
     recognitionModeCombo->addItem("Precise Recognition (Server-based, High accuracy)");
-    recognitionModeCombo->addItem("OpenAI Recognition (Cloud API, Highest accuracy)");
     recognitionModeCombo->setToolTip("Select the recognition mode that best suits your needs");
+    
+    // 从配置文件加载上次使用的识别模式
+    loadLastRecognitionMode();
     
     // 添加高级设置按钮
     QPushButton* settingsButton = new QPushButton("Advanced Settings", this);
@@ -505,7 +509,7 @@ void WhisperGUI::setupConnections() {
     // 连接识别结果信号
     connect(audioProcessor, &AudioProcessor::recognitionResultReady, this, &WhisperGUI::appendFinalOutput);
     //connect(audioProcessor, &AudioProcessor::translationResultReady, this, &WhisperGUI::appendFinalOutput);
-    connect(audioProcessor, &AudioProcessor::openAIResultReady, this, &WhisperGUI::appendFinalOutput);
+
     connect(audioProcessor, &AudioProcessor::preciseServerResultReady, this, &WhisperGUI::appendFinalOutput);
     
     // 连接处理完全停止的信号
@@ -716,11 +720,36 @@ void WhisperGUI::onPlaybackStateChanged(QMediaPlayer::PlaybackState state) {
         positionTimer->stop();
         isPlaying = false;
         
-        // 如果正在录制，停止处理
+        // 修复：播放结束时不要暂停音频处理，让最后段识别完成
         if (isRecording) {
-            // 不要完全停止处理，而是暂停它
-            audioProcessor->pauseProcessing();
-            appendLogMessage("Audio processing paused due to playback stop");
+            appendLogMessage("Media playback stopped, but keeping audio processing active for final segment completion");
+            // 不调用 pauseProcessing()，让最后段识别自然完成
+            
+            // 启动一个定时器来检查处理状态，而不是立即暂停
+            QTimer::singleShot(8000, this, [this]() {
+                // 8秒后检查是否仍在录制但媒体已停止
+                if (isRecording && !isPlaying && audioProcessor) {
+                    // 检查是否有活跃的识别请求
+                    bool hasActiveRequests = audioProcessor->hasActiveRecognitionRequests();
+                    appendLogMessage("Checking if final segment processing is complete... Active requests: " + 
+                                   QString::number(hasActiveRequests ? 1 : 0));
+                    
+                    // 如果没有活跃请求，让AudioProcessor的延迟处理机制自行决定是否完成
+                    if (!hasActiveRequests) {
+                        appendLogMessage("No active recognition requests found, final segment processing likely complete");
+                    } else {
+                        appendLogMessage("Active recognition requests still exist, continuing to wait...");
+                        // 再次检查，延长等待时间
+                        QTimer::singleShot(5000, this, [this]() {
+                            if (isRecording && !isPlaying && audioProcessor) {
+                                bool stillActive = audioProcessor->hasActiveRecognitionRequests();
+                                appendLogMessage("Extended check - Active requests: " + 
+                                               QString::number(stillActive ? 1 : 0));
+                            }
+                        });
+                    }
+                }
+            });
         }
         
         // 重置时间显示
@@ -1068,11 +1097,7 @@ void WhisperGUI::onTemporaryFileCreated(const QString& filePath) {
     
     appendLogMessage("Temporary file created: " + filePath);
     
-    // 检查是否启用了OpenAI API
-    if (!audioProcessor->isUsingOpenAI()) {
-        appendLogMessage("OpenAI API processing skipped (disabled)");
-        return;
-    }
+
     
     // 注意: 我们不再在这里处理文件，因为在AudioProcessor中已经处理过了
     // 分段处理模式下，文件会直接由AudioProcessor处理
@@ -1126,14 +1151,7 @@ void WhisperGUI::processFile(const QString& filePath) {
     }
 }
 
-// 新增：处理OpenAI API开关状态变化
-void WhisperGUI::onUseOpenAIChanged(int state) {
-    bool enabled = (state == Qt::Checked);
-    if (audioProcessor) {
-        audioProcessor->setUseOpenAI(enabled);
-    }
-    appendLogMessage(enabled ? "OpenAI API enabled" : "OpenAI API disabled");
-}
+
 
 // 实现原有的 startRecording 方法 (在 onStartButtonClicked 之外单独保留)
 void WhisperGUI::startRecording() {
@@ -1171,21 +1189,30 @@ void WhisperGUI::startRecording() {
         AudioProcessor::InputMode currentMode = audioProcessor->getCurrentInputMode();
         
         // 根据不同的输入模式执行不同的操作
-        // 修复：只有在明确是麦克风模式且没有文件时才使用麦克风
+        // 修复：添加对VIDEO_STREAM模式的支持
         if (currentMode == AudioProcessor::InputMode::MICROPHONE) {
             // 只有明确是麦克风模式时才使用麦克风
             appendLogMessage("Using microphone as input source");
             audioProcessor->setInputMode(AudioProcessor::InputMode::MICROPHONE);
         } else if (currentMode == AudioProcessor::InputMode::AUDIO_FILE || 
-                   currentMode == AudioProcessor::InputMode::VIDEO_FILE) {
-            // 如果是文件模式，保持当前模式不变
+                   currentMode == AudioProcessor::InputMode::VIDEO_FILE ||
+                   currentMode == AudioProcessor::InputMode::VIDEO_STREAM) {
+            // 如果是文件或流模式，保持当前模式不变
             QString modeName;
+            bool shouldShowVideo = false;
+            
             if (currentMode == AudioProcessor::InputMode::AUDIO_FILE) {
                 modeName = "Audio File";
             } else if (currentMode == AudioProcessor::InputMode::VIDEO_FILE) {
                 modeName = "Video File";
-                
-                // 对于视频，确保视频窗口可见
+                shouldShowVideo = true;
+            } else if (currentMode == AudioProcessor::InputMode::VIDEO_STREAM) {
+                modeName = "Video Stream (Local or Remote)";
+                shouldShowVideo = true;
+            }
+            
+            // 对于视频相关模式，确保视频窗口可见
+            if (shouldShowVideo) {
                 if (videoWidget && !videoWidget->isVisible()) {
                     videoWidget->show();
                     
@@ -1204,6 +1231,7 @@ void WhisperGUI::startRecording() {
                     appendLogMessage("视频窗口已在主界面中显示");
                 }
             }
+            
             appendLogMessage("Using " + modeName + " as input source");
             
             // 激活播放控件 - 提前激活，确保UI状态正确
@@ -1228,9 +1256,10 @@ void WhisperGUI::startRecording() {
         // 开始处理
         audioProcessor->startProcessing();
         
-        // 对于音频和视频文件，确保媒体播放器也开始播放
+        // 对于音频和视频文件/流，确保媒体播放器也开始播放
         if (currentMode == AudioProcessor::InputMode::AUDIO_FILE || 
-            currentMode == AudioProcessor::InputMode::VIDEO_FILE) {
+            currentMode == AudioProcessor::InputMode::VIDEO_FILE ||
+            currentMode == AudioProcessor::InputMode::VIDEO_STREAM) {
             
             // 注释掉这部分代码，因为startProcessing中已经会开始播放媒体
             // if (!audioProcessor->isPlaying()) {
@@ -1242,7 +1271,8 @@ void WhisperGUI::startRecording() {
             updateMediaPosition();
             
             // 为避免视频播放超前，添加短暂延迟等待音频处理初始化
-            if (currentMode == AudioProcessor::InputMode::VIDEO_FILE) {
+            if (currentMode == AudioProcessor::InputMode::VIDEO_FILE || 
+                currentMode == AudioProcessor::InputMode::VIDEO_STREAM) {
                 appendLogMessage("Adding brief delay to synchronize video with audio processing...");
                 QThread::msleep(500);  // 增加短暂延迟，让音频处理有时间初始化
             }
@@ -1555,135 +1585,7 @@ void WhisperGUI::onUpdatePosition()
     }
 }
 
-void WhisperGUI::onOpenAIResultReady(const QString& result)
-{
-    static int resultCounter = 0;
-    resultCounter++;
-    
-    // Add more detailed logging
-    LOG_INFO("==== onOpenAIResultReady slot function called ====");
-    LOG_INFO("Received result #" + std::to_string(resultCounter) + ", length: " + 
-             std::to_string(result.length()) + " characters");
-    
-    // If the result is empty, log and return
-    if (result.isEmpty()) {
-        LOG_WARNING("Empty result received, cannot process");
-        return;
-    }
-    
-    // Record the first few characters of the result for debugging
-    QString preview = result.length() > 50 ? result.left(50) + "..." : result;
-    LOG_INFO("Result preview: " + preview.toStdString());
-    
-    // Directly add the result to the OpenAI output area, skipping unnecessary processing
-            LOG_INFO("Calling appendFinalOutput to display result");
-        appendFinalOutput(result);
-    
-    // If subtitles are enabled, add the recognition result to the subtitle manager
-    if (enableSubtitlesCheckBox && enableSubtitlesCheckBox->isChecked() && subtitleManager) {
-        qint64 timestamp = mediaPlayer ? mediaPlayer->position() : 0;
-        LOG_INFO("Adding subtitle, timestamp: " + std::to_string(timestamp));
-        subtitleManager->addSubtitle(timestamp, timestamp + 5000, result, false);
-        subtitleManager->updateSubtitleDisplay(timestamp);
-    }
-    
-    LOG_INFO("==== onOpenAIResultReady slot function processing completed ====");
-}
 
-// 添加一个新的函数用于验证和调试OpenAI API连接
-void WhisperGUI::checkOpenAIAPIConnection() {
-    appendLogMessage("Checking OpenAI API connection...");
-    
-    // 显示等待状态
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    
-    // 使用新添加的测试方法
-    bool success = audioProcessor->testOpenAIConnection();
-    
-    // 恢复鼠标状态
-    QApplication::restoreOverrideCursor();
-    
-    if (success) {
-        appendLogMessage("OpenAI API connection test successful!");
-        QMessageBox::information(this, "Connection Successful", "OpenAI API server connection test successful!");
-    } else {
-        appendLogMessage("OpenAI API connection test failed!");
-        
-        // 构建详细的错误消息
-        QString errorMsg = "Failed to connect to OpenAI API server.\n\n";
-        errorMsg += "Please check:\n";
-        errorMsg += "1. Is the API server running at: " + QString::fromStdString(audioProcessor->getOpenAIServerURL()) + "\n";
-        errorMsg += "2. Is your network connection working properly\n";
-        errorMsg += "3. Is there any firewall or security software blocking the connection\n\n";
-        errorMsg += "Would you like to modify the server address?";
-        
-        QMessageBox::StandardButton reply;
-        reply = QMessageBox::critical(this, "Connection Failed", 
-                                    errorMsg,
-                                    QMessageBox::Yes | QMessageBox::No);
-        
-        if (reply == QMessageBox::Yes) {
-            QString currentUrl = QString::fromStdString(audioProcessor->getOpenAIServerURL());
-            bool ok;
-            QString newUrl = QInputDialog::getText(this, "Modify Server URL",
-                                                "Enter OpenAI API server address:",
-                                                QLineEdit::Normal,
-                                                currentUrl, &ok);
-            if (ok && !newUrl.isEmpty()) {
-                audioProcessor->setOpenAIServerURL(newUrl.toStdString());
-                appendLogMessage("API server address updated to: " + newUrl);
-            }
-        }
-    }
-}
-
-// 修改handleOpenAIError方法，增加API检查按钮
-void WhisperGUI::handleOpenAIError(const QString& error) {
-    // 记录错误信息
-    QString errorMessage = "OpenAI API Error: " + error;
-    appendLogMessage(errorMessage);
-    
-    // 创建包含详细解决步骤的错误信息
-    QString detailedError = "<p><b>OpenAI API Call Failed</b></p>";
-    detailedError += "<p>" + error + "</p>";
-    detailedError += "<p>Please check the following:</p>";
-    detailedError += "<ol>";
-    detailedError += "<li>Confirm Python API server is running (python sre.py)</li>";
-    detailedError += "<li>Check if server URL is correct, should be: <code>http://127.0.0.1:5000/transcribe</code></li>";
-    detailedError += "<li>Verify a valid OpenAI API key is set (OPENAI_API_KEY environment variable)</li>";
-    detailedError += "<li>Check Python server console for error messages</li>";
-    detailedError += "</ol>";
-    
-    // 自定义错误对话框，添加检查连接按钮
-    QMessageBox msgBox(QMessageBox::Critical, "OpenAI API Error", detailedError);
-    msgBox.setTextFormat(Qt::RichText);
-    
-    // 添加检查连接按钮
-    QPushButton* checkButton = msgBox.addButton("Check API Connection", QMessageBox::ActionRole);
-    msgBox.addButton(QMessageBox::Ok);
-    
-    msgBox.exec();
-    
-    // 如果用户点击了检查连接按钮
-    if (msgBox.clickedButton() == checkButton) {
-        checkOpenAIAPIConnection();
-    }
-}
-
-void WhisperGUI::updateOpenAISettings(bool use_openai, const std::string& server_url) {
-    // OpenAI设置已移动到高级设置对话框中
-    
-    // 更新日志
-    appendLogMessage(QString("OpenAI API settings updated: enabled=%1, server=%2")
-                    .arg(use_openai ? "true" : "false")
-                    .arg(QString::fromStdString(server_url)));
-}
-
-void WhisperGUI::updateOpenAIModel(const std::string& model) {
-    // OpenAI模型设置已移动到高级设置对话框中
-    appendLogMessage(QString("OpenAI model updated: %1")
-                    .arg(QString::fromStdString(model)));
-}
 
 void WhisperGUI::onProcessingFullyStopped() {
     appendLogMessage("Audio processing thread has completely stopped");
@@ -1867,89 +1769,7 @@ void WhisperGUI::showSettingsDialog() {
     
     serverSettingsLayout->addLayout(preciseServerLayout);
     
-    // OpenAI API设置
-    QHBoxLayout* openaiServerLayout = new QHBoxLayout();
-    QLabel* openaiServerLabel = new QLabel(tr("OpenAI API Server URL:"));
-    QLineEdit* openaiServerEdit = new QLineEdit();
-    openaiServerEdit->setText(QString::fromStdString(
-        audioProcessor ? audioProcessor->getOpenAIServerURL() : "http://127.0.0.1:5000"));
-    
-    // OpenAI模型设置
-    QHBoxLayout* openaiModelLayout = new QHBoxLayout();
-    QLabel* openaiModelLabel = new QLabel(tr("OpenAI Model:"));
-    QLineEdit* openaiModelEdit = new QLineEdit();
-    openaiModelEdit->setText(QString::fromStdString(
-        audioProcessor ? audioProcessor->getOpenAIModel() : "whisper-1"));
-    
-    // OpenAI启用复选框
-    QCheckBox* useOpenAICheckBox = new QCheckBox(tr("Enable OpenAI API"));
-    useOpenAICheckBox->setChecked(audioProcessor ? audioProcessor->isUsingOpenAI() : false);
-    
-    // OpenAI连接测试按钮
-    QPushButton* testOpenAIButton = new QPushButton(tr("Test OpenAI Connection"));
-    connect(testOpenAIButton, &QPushButton::clicked, this, [this, openaiServerEdit]() {
-        if (audioProcessor) {
-            // 保存新的URL
-            std::string newUrl = openaiServerEdit->text().toStdString();
-            audioProcessor->setOpenAIServerURL(newUrl);
-            
-            // 显示等待状态
-            QApplication::setOverrideCursor(Qt::WaitCursor);
-            
-            // 测试连接
-            bool success = audioProcessor->testOpenAIConnection();
-            
-            // 恢复鼠标状态
-            QApplication::restoreOverrideCursor();
-            
-            if (success) {
-                QMessageBox::information(this, tr("Connection Successful"), 
-                    tr("Successfully connected to the OpenAI API server."));
-                appendLogMessage("OpenAI API connection test successful: " + QString::fromStdString(newUrl));
-            } else {
-                QMessageBox::warning(this, tr("Connection Failed"), 
-                    tr("Failed to connect to the OpenAI API server. Please check the URL and server status."));
-                appendLogMessage("OpenAI API connection test failed: " + QString::fromStdString(newUrl));
-            }
-        }
-    });
-    
-    // 保存OpenAI设置按钮
-    QPushButton* saveOpenAIButton = new QPushButton(tr("Save OpenAI Settings"));
-    connect(saveOpenAIButton, &QPushButton::clicked, this, [this, openaiServerEdit, openaiModelEdit, useOpenAICheckBox]() {
-        if (audioProcessor) {
-            std::string newUrl = openaiServerEdit->text().toStdString();
-            std::string newModel = openaiModelEdit->text().toStdString();
-            bool enableOpenAI = useOpenAICheckBox->isChecked();
-            
-            audioProcessor->setOpenAIServerURL(newUrl);
-            audioProcessor->setOpenAIModel(newModel);
-            audioProcessor->setUseOpenAI(enableOpenAI);
-            
-            appendLogMessage("OpenAI settings updated - URL: " + QString::fromStdString(newUrl) + 
-                           ", Model: " + QString::fromStdString(newModel) + 
-                           ", Enabled: " + (enableOpenAI ? "Yes" : "No"));
-        }
-    });
-    
-    connect(useOpenAICheckBox, &QCheckBox::toggled, this, [this](bool checked) {
-        if (audioProcessor) {
-            audioProcessor->setUseOpenAI(checked);
-            appendLogMessage(checked ? "OpenAI API enabled" : "OpenAI API disabled");
-        }
-    });
-    
-    openaiServerLayout->addWidget(openaiServerLabel);
-    openaiServerLayout->addWidget(openaiServerEdit);
-    openaiServerLayout->addWidget(testOpenAIButton);
-    
-    openaiModelLayout->addWidget(openaiModelLabel);
-    openaiModelLayout->addWidget(openaiModelEdit);
-    
-    serverSettingsLayout->addLayout(openaiServerLayout);
-    serverSettingsLayout->addLayout(openaiModelLayout);
-    serverSettingsLayout->addWidget(useOpenAICheckBox);
-    serverSettingsLayout->addWidget(saveOpenAIButton);
+
     
     serverSettingsGroup->setLayout(serverSettingsLayout);
     
@@ -2104,11 +1924,6 @@ void WhisperGUI::onRecognitionModeChanged(int index) {
             }
         }
         break;
-    case 2:
-        mode = RecognitionMode::OPENAI_RECOGNITION;
-        modeName = "OpenAI Recognition (Cloud API)";
-        // OpenAI设置已移动到高级设置中
-        break;
     default:
         mode = RecognitionMode::FAST_RECOGNITION;
         modeName = "Fast Recognition (Default)";
@@ -2120,16 +1935,12 @@ void WhisperGUI::onRecognitionModeChanged(int index) {
         audioProcessor->setRecognitionMode(mode);
         appendLogMessage("Recognition mode changed to: " + modeName);
         
+        // 保存识别模式到配置文件
+        saveRecognitionModeToConfig(mode);
+        
         // 实时分段控件已移除
         
-        // 当选择OpenAI模式时，确保useOpenAI选项打开
-        if (mode == RecognitionMode::OPENAI_RECOGNITION) {
-            // 检查OpenAI API设置是否可用
-            QString apiUrl = QString::fromStdString(audioProcessor->getOpenAIServerURL());
-            if (apiUrl.isEmpty() || apiUrl == "http://127.0.0.1:5000") {
-                logMessage(this, "Warning: OpenAI API URL is not properly configured.", true);
-            }
-        }
+
     }
 }
 
@@ -2250,4 +2061,291 @@ void WhisperGUI::prepareVideoWidget() {
     }
     
     appendLogMessage("视频播放组件已准备就绪");
+}
+
+// 视频流输入相关的函数实现
+void WhisperGUI::onStreamUrlChanged() {
+    if (!streamUrlEdit || !streamValidationTimer) {
+        return;
+    }
+    
+    QString url = streamUrlEdit->text().trimmed();
+    if (url.isEmpty()) {
+        streamStatusLabel->setText("Enter stream URL to begin");
+        streamStatusLabel->setStyleSheet("QLabel { color: gray; font-size: 10px; }");
+        currentStreamUrl.clear();
+        return;
+    }
+    
+    // 停止任何现有的验证
+    streamValidationTimer->stop();
+    streamStatusLabel->setText("Preparing to validate stream...");
+    streamStatusLabel->setStyleSheet("QLabel { color: orange; font-size: 10px; }");
+    
+    // 设置延迟验证
+    currentStreamUrl = url;
+    streamValidationTimer->start();
+    
+    appendLogMessage("Stream URL changed to: " + url);
+}
+
+void WhisperGUI::validateStreamConnection() {
+    if (currentStreamUrl.isEmpty() || !streamValidator) {
+        return;
+    }
+    
+    // 创建当前URL的副本以避免并发访问问题
+    QString urlToValidate = currentStreamUrl;
+    
+    appendLogMessage("Validating stream connection: " + urlToValidate);
+    streamStatusLabel->setText("Validating stream...");
+    streamStatusLabel->setStyleSheet("QLabel { color: blue; font-size: 10px; }");
+    streamValidationProgress->setVisible(true);
+    streamValidationProgress->setRange(0, 0); // 不确定进度
+    
+    // 检查URL格式
+    QUrl url(urlToValidate);
+    if (!url.isValid()) {
+        streamStatusLabel->setText("Invalid URL format");
+        streamStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+        streamValidationProgress->setVisible(false);
+        appendLogMessage("Stream URL validation failed: Invalid format");
+        return;
+    }
+    
+    // 支持的流协议
+    QString scheme = url.scheme().toLower();
+    if (scheme != "http" && scheme != "https" && scheme != "rtmp" && scheme != "rtmps" && 
+        scheme != "rtsp" && scheme != "udp" && scheme != "tcp" && scheme != "file") {
+        streamStatusLabel->setText("Unsupported protocol: " + scheme);
+        streamStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+        streamValidationProgress->setVisible(false);
+        appendLogMessage("Stream URL validation failed: Unsupported protocol - " + scheme);
+        return;
+    }
+    
+    // 对于本地文件，验证文件存在性
+    if (scheme == "file") {
+        QString localPath = url.toLocalFile();
+        QFileInfo fileInfo(localPath);
+        
+        if (!fileInfo.exists()) {
+            streamStatusLabel->setText("Local file not found");
+            streamStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+            streamValidationProgress->setVisible(false);
+            appendLogMessage("Local file validation failed: File not found - " + localPath);
+            return;
+        }
+        
+        if (!fileInfo.isReadable()) {
+            streamStatusLabel->setText("Local file not readable");
+            streamStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+            streamValidationProgress->setVisible(false);
+            appendLogMessage("Local file validation failed: File not readable - " + localPath);
+            return;
+        }
+        
+        // 检查文件扩展名
+        QString fileName = fileInfo.fileName().toLower();
+        if (fileName.endsWith(".m3u8") || fileName.endsWith(".ts") || 
+            fileName.endsWith(".mp4") || fileName.endsWith(".mkv") || 
+            fileName.endsWith(".avi") || fileName.endsWith(".mov")) {
+            
+            streamStatusLabel->setText("Local media file validated");
+            streamStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
+            streamValidationProgress->setVisible(false);
+            
+            // 设置输入模式为视频流
+            if (audioProcessor) {
+                audioProcessor->setInputMode(AudioProcessor::InputMode::VIDEO_STREAM);
+                audioProcessor->setStreamUrl(urlToValidate.toStdString());
+                appendLogMessage("Input mode set to VIDEO_STREAM for local file");
+            }
+            
+            appendLogMessage("Local media file validated: " + localPath);
+        } else {
+            streamStatusLabel->setText("Unsupported file type");
+            streamStatusLabel->setStyleSheet("QLabel { color: orange; font-size: 10px; }");
+            streamValidationProgress->setVisible(false);
+            appendLogMessage("Local file validation warning: Unsupported file type - " + fileName);
+            
+            // 仍然允许用户尝试
+            if (audioProcessor) {
+                audioProcessor->setInputMode(AudioProcessor::InputMode::VIDEO_STREAM);
+                audioProcessor->setStreamUrl(urlToValidate.toStdString());
+            }
+        }
+    }
+    // 对于HTTP/HTTPS，尝试网络请求验证
+    else if (scheme == "http" || scheme == "https") {
+        QNetworkRequest request(url);
+        request.setRawHeader("User-Agent", "Stream Recognition Client/1.0");
+        // 移除FollowRedirectsAttribute以兼容更多Qt版本
+        // request.setAttribute(QNetworkRequest::FollowRedirectsAttribute, true);
+        
+        QNetworkReply* reply = streamValidator->head(request);
+        
+        // 设置超时
+        QTimer* timeoutTimer = new QTimer(this);
+        timeoutTimer->setSingleShot(true);
+        timeoutTimer->setInterval(10000); // 10秒超时
+        
+        // 使用QPointer确保对象生命周期安全
+        QPointer<QNetworkReply> safeReply(reply);
+        QPointer<QTimer> safeTimer(timeoutTimer);
+        
+        connect(timeoutTimer, &QTimer::timeout, [safeReply, this]() {
+            if (safeReply && safeReply->isRunning()) {
+                safeReply->abort();
+                // 确保在主线程中更新GUI
+                QMetaObject::invokeMethod(this, [this]() {
+                    streamStatusLabel->setText("Connection timeout");
+                    streamStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+                    streamValidationProgress->setVisible(false);
+                    appendLogMessage("Stream validation timeout");
+                }, Qt::QueuedConnection);
+            }
+        });
+        
+        connect(reply, &QNetworkReply::finished, [this, safeReply, safeTimer]() {
+            if (safeTimer) {
+                safeTimer->stop();
+                safeTimer->deleteLater();
+            }
+            
+            // 确保在主线程中处理结果
+            QMetaObject::invokeMethod(this, [this]() {
+                onStreamValidationFinished();
+            }, Qt::QueuedConnection);
+            
+            if (safeReply) {
+                safeReply->deleteLater();
+            }
+        });
+        
+        timeoutTimer->start();
+    } else {
+        // 对于其他协议（RTMP、RTSP等），标记为有效但需要ffmpeg验证
+        streamStatusLabel->setText("Stream URL accepted (will verify during playback)");
+        streamStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
+        streamValidationProgress->setVisible(false);
+        
+        // 线程安全地设置输入模式为视频流
+        if (audioProcessor) {
+            audioProcessor->setInputMode(AudioProcessor::InputMode::VIDEO_STREAM);
+            audioProcessor->setStreamUrl(urlToValidate.toStdString());
+            appendLogMessage("Input mode set to VIDEO_STREAM");
+        }
+        
+        appendLogMessage("Stream URL validated: " + urlToValidate);
+    }
+}
+
+void WhisperGUI::onStreamValidationFinished() {
+    QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) {
+        return;
+    }
+    
+    // 创建当前流URL的副本以确保线程安全
+    QString currentUrl = currentStreamUrl;
+    
+    streamValidationProgress->setVisible(false);
+    
+    if (reply->error() == QNetworkReply::NoError) {
+        // 检查响应头
+        QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+        qint64 contentLength = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        
+        appendLogMessage(QString("Stream response - Content-Type: %1, Length: %2")
+                        .arg(contentType).arg(contentLength));
+        
+        // 检查是否是视频/音频内容
+        if (contentType.contains("video", Qt::CaseInsensitive) ||
+            contentType.contains("audio", Qt::CaseInsensitive) ||
+            contentType.contains("application/vnd.apple.mpegurl", Qt::CaseInsensitive) || // m3u8
+            contentType.contains("application/x-mpegURL", Qt::CaseInsensitive) ||
+            currentUrl.endsWith(".m3u8", Qt::CaseInsensitive) ||
+            currentUrl.endsWith(".ts", Qt::CaseInsensitive)) {
+            
+            streamStatusLabel->setText("Valid stream detected");
+            streamStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
+            
+            // 线程安全地设置输入模式为视频流
+            if (audioProcessor) {
+                audioProcessor->setInputMode(AudioProcessor::InputMode::VIDEO_STREAM);
+                audioProcessor->setStreamUrl(currentUrl.toStdString());
+                appendLogMessage("Input mode set to VIDEO_STREAM");
+            }
+            
+            appendLogMessage("Stream validation successful: " + currentUrl);
+        } else {
+            streamStatusLabel->setText("Not a valid media stream");
+            streamStatusLabel->setStyleSheet("QLabel { color: orange; font-size: 10px; }");
+            appendLogMessage("Stream validation warning: Content type may not be media - " + contentType);
+            
+            // 仍然允许用户尝试，但给出警告
+            if (audioProcessor) {
+                audioProcessor->setInputMode(AudioProcessor::InputMode::VIDEO_STREAM);
+                audioProcessor->setStreamUrl(currentUrl.toStdString());
+            }
+        }
+    } else {
+        QString errorString = reply->errorString();
+        streamStatusLabel->setText("Connection failed: " + errorString);
+        streamStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+        appendLogMessage("Stream validation failed: " + errorString);
+    }
+}
+
+void WhisperGUI::loadLastRecognitionMode() {
+    try {
+        // 从配置管理器获取上次的识别模式
+        ConfigManager& config = ConfigManager::getInstance();
+        RecognitionMode lastMode = config.getRecognitionMode();
+        
+        // 根据模式设置下拉框的选择
+        int comboIndex = 0;  // 默认选择快速识别
+        switch (lastMode) {
+        case RecognitionMode::FAST_RECOGNITION:
+            comboIndex = 0;
+            break;
+        case RecognitionMode::PRECISE_RECOGNITION:
+            comboIndex = 1;
+            break;
+
+        }
+        
+        // 设置下拉框选择并触发相应的事件
+        recognitionModeCombo->setCurrentIndex(comboIndex);
+        
+        // 同步设置AudioProcessor的识别模式
+        if (audioProcessor) {
+            audioProcessor->setRecognitionMode(lastMode);
+        }
+        
+        appendLogMessage("Loaded last recognition mode from config");
+        
+    } catch (const std::exception& e) {
+        appendLogMessage(QString("Warning: Could not load last recognition mode: ") + e.what());
+        // 如果出错，默认选择快速识别
+        recognitionModeCombo->setCurrentIndex(0);
+    }
+}
+
+void WhisperGUI::saveRecognitionModeToConfig(RecognitionMode mode) {
+    try {
+        ConfigManager& config = ConfigManager::getInstance();
+        config.setRecognitionMode(mode);
+        
+        // 保存配置到文件
+        if (config.saveConfig()) {
+            appendLogMessage("Recognition mode saved to config file");
+        } else {
+            appendLogMessage("Warning: Could not save recognition mode to config file");
+        }
+        
+    } catch (const std::exception& e) {
+        appendLogMessage(QString("Warning: Could not save recognition mode: ") + e.what());
+    }
 }

@@ -46,8 +46,7 @@ public:
     explicit WhisperGUI(QWidget *parent = nullptr);
     ~WhisperGUI();
 
-    void updateOpenAISettings(bool use_openai, const std::string& server_url);
-    void updateOpenAIModel(const std::string& model);
+
 
     // 添加以下方法，用于直接从AudioProcessor访问
     bool isSubtitlesEnabled() const { return enableSubtitlesCheckBox && enableSubtitlesCheckBox->isChecked(); }
@@ -67,9 +66,7 @@ public slots:
     void appendFinalOutput(const QString& text);
     void appendLogMessage(const QString& message);
     void appendErrorMessage(const QString& error);
-    void onOpenAIResultReady(const QString& result);
-    void handleOpenAIError(const QString& error);
-    void checkOpenAIAPIConnection();
+
     void play();
     void pause();
     void stop();
@@ -97,7 +94,7 @@ public slots:
     void stopRecording();
     void selectInputFile();
     void processFile(const QString& filePath);
-    void onUseOpenAIChanged(int state);
+
     void onEnableSubtitlesChanged(int state);
     void onSubtitlePositionChanged(int index);
     void onDualSubtitlesChanged(int state);
@@ -128,6 +125,10 @@ private:
     void setupConnections();
     void setupBetterFont();
     void safeInitialize();
+    
+    // 识别模式记忆功能
+    void loadLastRecognitionMode();
+    void saveRecognitionModeToConfig(RecognitionMode mode);
 
     // UI元素
     QWidget* centralWidget;

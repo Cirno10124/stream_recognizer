@@ -5,6 +5,8 @@
 #include <iostream>
 #include <windows.h> // 添加Windows API头文件
 #include <algorithm> 
+#include <filesystem>
+#include <mutex> 
 // FastRecognizer实现
 FastRecognizer::FastRecognizer(const std::string& model_path, ResultQueue* input_queue,
                               const std::string& language, bool use_gpu, float vad_threshold)
@@ -13,34 +15,92 @@ FastRecognizer::FastRecognizer(const std::string& model_path, ResultQueue* input
       output_queue(nullptr),
       language(language),
       use_gpu(use_gpu),
-      vad_threshold(vad_threshold) {
+      vad_threshold(vad_threshold),
+      ctx(nullptr) {
+    
+    // 使用静态mutex确保whisper初始化的线程安全
+    static std::mutex whisper_init_mutex;
+    std::lock_guard<std::mutex> lock(whisper_init_mutex);
+    
+    try {
+        // 验证模型路径
+        if (model_path.empty()) {
+            throw std::runtime_error("Model path is empty");
+        }
+        
+        // 检查模型文件是否存在
+        if (!std::filesystem::exists(model_path)) {
+            throw std::runtime_error("Model file not found: " + model_path);
+        }
+        
+        // 检查文件大小
+        std::error_code ec;
+        auto file_size = std::filesystem::file_size(model_path, ec);
+        if (ec || file_size < 1024) {
+            throw std::runtime_error("Invalid or corrupt model file: " + model_path);
+        }
+        
+        std::cout << "Initializing FastRecognizer with model: " << model_path << std::endl;
+        
     // 在构造函数中加载模型
     struct whisper_context_params params = whisper_context_default_params();
     
-    // 配置 GPU 使用
+        // 安全地配置参数
+        params.use_gpu = use_gpu;
+        params.flash_attn = false;  // 禁用flash attention以避免兼容性问题
+        params.dtw_token_timestamps = false;  // 禁用DTW以减少内存使用
+        
     if (use_gpu) {
-        // 设置 GPU 相关参数
-        params.use_gpu = true;
         params.gpu_device = 0;  // 使用第一个 GPU 设备
+            std::cout << "GPU acceleration enabled, device ID: 0" << std::endl;
+        } else {
+            std::cout << "Using CPU mode" << std::endl;
+        }
         
-        // 根据whisper.h定义，flash_attn参数是可选的，设置为false
-        params.flash_attn = false;
+        // 分步骤初始化whisper context以便更好的错误处理
+        std::cout << "Loading whisper model..." << std::endl;
         
-        std::cout << "启用GPU加速，设备ID: 0" << std::endl;
-    } else {
+        // 第一次尝试：使用指定设置
+        ctx = whisper_init_from_file_with_params(model_path.c_str(), params);
+        
+        if (!ctx && use_gpu) {
+            // GPU模式失败，尝试CPU回退
+            std::cout << "GPU initialization failed, trying CPU fallback..." << std::endl;
         params.use_gpu = false;
-        std::cout << "使用CPU模式运行" << std::endl;
-    }
-    
-    // 加载模型
     ctx = whisper_init_from_file_with_params(model_path.c_str(), params);
+            
+            if (ctx) {
+                this->use_gpu = false;  // 更新状态
+                std::cout << "Successfully loaded model in CPU fallback mode" << std::endl;
+            }
+        }
+        
     if (!ctx) {
-        std::cerr << "Failed to load fast recognition model: " << model_path << std::endl;
-        throw std::runtime_error("Failed to initialize fast recognition model");
+            throw std::runtime_error("Failed to initialize whisper context from model: " + model_path);
     }
     
     std::cout << "Fast recognition model loaded successfully: " << model_path 
-              << (use_gpu ? " (GPU enabled)" : " (CPU mode)") << std::endl;
+                  << (this->use_gpu ? " (GPU enabled)" : " (CPU mode)") << std::endl;
+                  
+    } catch (const std::exception& e) {
+        // 确保清理任何部分初始化的资源
+        if (ctx) {
+            whisper_free(ctx);
+            ctx = nullptr;
+        }
+        
+        std::cerr << "FastRecognizer initialization failed: " << e.what() << std::endl;
+        throw std::runtime_error("Failed to initialize FastRecognizer: " + std::string(e.what()));
+    } catch (...) {
+        // 处理未知异常
+        if (ctx) {
+            whisper_free(ctx);
+            ctx = nullptr;
+        }
+        
+        std::cerr << "FastRecognizer initialization failed with unknown error" << std::endl;
+        throw std::runtime_error("Failed to initialize FastRecognizer: unknown error");
+    }
 }
 
 FastRecognizer::~FastRecognizer() {
@@ -130,7 +190,7 @@ void FastRecognizer::process_audio_batch(const std::vector<AudioBuffer>& batch) 
         std::cerr << "Fast recognition failed" << std::endl;
         return;
     }
-    
+     
     auto recend = std::chrono::high_resolution_clock::now();
     auto rectime = std::chrono::duration_cast<std::chrono::milliseconds>(recend - recstart).count();
     

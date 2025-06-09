@@ -4,11 +4,15 @@
 #include <string>
 #include <nlohmann/json.hpp>
 
+// 前向声明识别模式枚举
+enum class RecognitionMode;
+
 class ConfigManager {
 public:
     static ConfigManager& getInstance();
     
     bool loadConfig(const std::string& configPath);
+    bool saveConfig(const std::string& configPath = "");  // 保存配置文件
     
     // 模型配置
     std::string getFastModelPath() const;
@@ -23,6 +27,10 @@ public:
     bool getDualLanguage() const;
     bool getFastMode() const;
     std::string getPreciseServerURL() const;
+    
+    // 识别模式配置（新增）
+    RecognitionMode getRecognitionMode() const;
+    void setRecognitionMode(RecognitionMode mode);
     
     // 音频配置
     int getSampleRate() const;
@@ -39,6 +47,7 @@ private:
     ConfigManager& operator=(const ConfigManager&) = delete;
     
     nlohmann::json config;
+    std::string config_file_path;  // 记录配置文件路径
 };
 
 #endif // CONFIG_MANAGER_H 

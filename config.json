@@ -17,7 +17,8 @@
         "fast_mode": false,
         "input_file": "C:/FFOutput/world.execute(me);.wav",
         "language": "en",
-        "precise_server_url": "http://192.168.0.19:8080",
+        "precise_server_url": "http://192.168.0.109:8080",
+        "recognition_mode": "precise",
         "target_language": "en",
         "vad_threshold": 0.15
     }

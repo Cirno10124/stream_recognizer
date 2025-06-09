@@ -6,6 +6,9 @@
 #include <iostream>
 #include <filesystem>
 #include <sstream>
+#include <cstring>
+#include <chrono>
+#include <ctime>
 #include "audio_types.h"
 
 namespace fs = std::filesystem;
@@ -110,7 +113,7 @@ public:
     }        
 
 
-    // 从AudioBuffer数组中创建WAV文件
+    // 从AudioBuffer数组中创建WAV文件 - 串行化内存分配以避免堆损坏
     static std::string createWavFromBuffers(const std::vector<AudioBuffer>& buffers, 
                                            const std::string& directory, 
                                            const std::string& prefix = "segment") {
@@ -118,24 +121,69 @@ public:
             return "";
         }
 
-        // 合并所有缓冲区数据
-        std::vector<float> combined;
-        size_t totalSize = 0;
-        for (const auto& buffer : buffers) {
-            totalSize += buffer.data.size();
-        }
-        combined.reserve(totalSize);
-        
-        for (const auto& buffer : buffers) {
-            combined.insert(combined.end(), buffer.data.begin(), buffer.data.end());
-        }
+        try {
+            // 计算总大小，防止无效缓冲区
+            size_t totalSize = 0;
+            for (const auto& buffer : buffers) {
+                if (!buffer.data.empty()) {
+                    totalSize += buffer.data.size();
+                }
+            }
+            
+            if (totalSize == 0) {
+                return "";  // 没有有效数据
+            }
 
-        // 生成文件名并保存
-        std::string filename = generateUniqueFilename(directory, prefix);
-        if (saveWavFile(filename, combined)) {
-            return filename;
+            // 串行化内存分配 - 一次性预分配完整大小，避免动态扩展
+            std::vector<float> combined;
+            try {
+                combined.reserve(totalSize);  // 预分配容量
+                combined.resize(totalSize);   // 设置实际大小
+            } catch (const std::bad_alloc& e) {
+                std::cerr << "内存分配失败，请求大小: " << totalSize * sizeof(float) << " 字节" << std::endl;
+                return "";
+            }
+            
+            // 串行化数据复制 - 使用指针算术避免迭代器失效
+            size_t current_offset = 0;
+            float* dest_ptr = combined.data();
+            
+            for (const auto& buffer : buffers) {
+                if (!buffer.data.empty()) {
+                    const size_t buffer_size = buffer.data.size();
+                    
+                    // 边界检查
+                    if (current_offset + buffer_size > totalSize) {
+                        throw std::runtime_error("缓冲区边界溢出");
+                    }
+                    
+                    // 串行化内存复制 - 使用安全的内存复制
+                    std::memcpy(dest_ptr + current_offset, buffer.data.data(), 
+                               buffer_size * sizeof(float));
+                    current_offset += buffer_size;
+                }
+            }
+
+            // 验证数据完整性
+            if (current_offset != totalSize) {
+                throw std::runtime_error("数据复制不完整: 期望 " + std::to_string(totalSize) + 
+                                        " 样本，实际复制 " + std::to_string(current_offset) + " 样本");
+            }
+
+            // 生成文件名并保存
+            std::string filename = generateUniqueFilename(directory, prefix);
+            if (saveWavFile(filename, combined)) {
+                return filename;
+            }
+            return "";
+            
+        } catch (const std::exception& e) {
+            std::cerr << "创建WAV文件时发生错误: " << e.what() << std::endl;
+            return "";
+        } catch (...) {
+            std::cerr << "创建WAV文件时发生未知错误" << std::endl;
+            return "";
         }
-        return "";
     }
 
     // 清理临时目录
@@ -175,22 +223,43 @@ public:
                 return false;
             }
         
-        // 创建一个临时的组合缓冲区
+        // 串行化内存分配 - 预分配组合缓冲区
         std::vector<float> combinedData;
-        combinedData.reserve(totalSamples);
-        
-        // 合并所有音频数据
-        for (const auto& buffer : buffers) {
-                if (!buffer.data.empty()) {
-            combinedData.insert(combinedData.end(), buffer.data.begin(), buffer.data.end());
-                }
-            }
-            
-            if (combinedData.empty()) {
-                std::cerr << "合并后的音频数据为空" << std::endl;
-                return false;
+        try {
+            combinedData.reserve(totalSamples);
+            combinedData.resize(totalSamples);
+        } catch (const std::bad_alloc& e) {
+            std::cerr << "内存分配失败，请求大小: " << totalSamples * sizeof(float) << " 字节" << std::endl;
+            return false;
         }
         
+        // 串行化数据合并 - 使用安全的内存复制
+        size_t current_offset = 0;
+        float* dest_ptr = combinedData.data();
+        
+        for (const auto& buffer : buffers) {
+            if (!buffer.data.empty()) {
+                const size_t buffer_size = buffer.data.size();
+                
+                // 边界检查
+                if (current_offset + buffer_size > totalSamples) {
+                    std::cerr << "缓冲区边界溢出" << std::endl;
+                    return false;
+                }
+                
+                // 使用memcpy进行串行化内存复制
+                std::memcpy(dest_ptr + current_offset, buffer.data.data(), 
+                           buffer_size * sizeof(float));
+                current_offset += buffer_size;
+            }
+        }
+        
+        // 验证数据完整性
+        if (current_offset != totalSamples) {
+            std::cerr << "数据合并不完整: 期望 " << totalSamples << " 样本，实际复制 " << current_offset << " 样本" << std::endl;
+            return false;
+        }
+            
         // 使用现有的saveWavFile方法保存合并后的数据
         return saveWavFile(filename, combinedData, sampleRate, channels, bitsPerSample);
             

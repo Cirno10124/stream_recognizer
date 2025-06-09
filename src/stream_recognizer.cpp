@@ -17,6 +17,8 @@
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QThread>
+#include <QMetaObject>
+#include <atomic>
 
 // 全局变量定义
 bool g_use_gpu = true;
@@ -127,21 +129,39 @@ int main(int argc, char* argv[]) {
     }
     
     // 预加载模型 - 从配置文件获取模型路径
-    bool success = processor->preloadModels(
-        [&loadingDialog](const std::string& message) {
+    std::atomic<bool> loading_success{false};
+    
+    // 使用线程安全的进度回调
+    auto progress_callback = [&loadingDialog](const std::string& message) {
+        // 在主线程中安全更新对话框
+        QMetaObject::invokeMethod(&loadingDialog, [&loadingDialog, message]() {
             loadingDialog.setMessage(QString::fromStdString(message));
             loadingDialog.setProgress(loadingDialog.progress() + 1);
+        }, Qt::QueuedConnection);
+        
+        // 处理Qt事件以更新UI
             QApplication::processEvents();
-        }
-    );
+    };
+    
+    bool success = processor->preloadModels(progress_callback);
     
     if (!success) {
+        // 安全关闭对话框
+        QMetaObject::invokeMethod(&loadingDialog, [&loadingDialog]() {
+            loadingDialog.close();
+        }, Qt::QueuedConnection);
+        
+        QApplication::processEvents();
         QMessageBox::critical(nullptr, "Error", "Failed to load models");
         return 1;
     }
     
-    // 关闭加载对话框
+    // 安全关闭加载对话框
+    QMetaObject::invokeMethod(&loadingDialog, [&loadingDialog]() {
     loadingDialog.close();
+    }, Qt::QueuedConnection);
+    
+    QApplication::processEvents();
     
     // 显示主窗口
     gui->show();

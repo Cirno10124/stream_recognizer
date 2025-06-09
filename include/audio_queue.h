@@ -6,6 +6,9 @@
 #include <atomic>
 #include "audio_types.h"
 
+// 前向声明
+class AudioProcessor;
+
 // 音频队列类
 class AudioQueue {
 public:
@@ -17,11 +20,16 @@ public:
     void reset();
     bool empty() { return queue.empty(); };
     
+    // 设置和获取关联的 AudioProcessor
+    void setProcessor(AudioProcessor* processor) { audio_processor = processor; }
+    AudioProcessor* getProcessor() const { return audio_processor; }
+    
 private:
     std::queue<AudioBuffer> queue;
     mutable std::mutex mutex;
     std::condition_variable condition;
     std::atomic<bool> terminated{false};
+    AudioProcessor* audio_processor = nullptr;
 };
 
 // 结果队列类

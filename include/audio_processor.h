@@ -42,8 +42,7 @@ class WhisperGUI;
 // 添加识别模式枚举
 enum class RecognitionMode {
     FAST_RECOGNITION,    // 使用本地快速模型
-    PRECISE_RECOGNITION, // 使用服务端精确识别
-    OPENAI_RECOGNITION   // 使用OpenAI API
+    PRECISE_RECOGNITION  // 使用服务端精确识别
 };
 
 // 识别参数结构体
@@ -76,7 +75,10 @@ public:
     // 输入模式控制
     void setInputMode(InputMode mode);
     void setInputFile(const std::string& file_path);
+    void setStreamUrl(const std::string& url);
     bool hasInputFile() const;
+    bool hasStreamUrl() const;
+    std::string getStreamUrl() const { return current_stream_url; }
     InputMode getCurrentInputMode() const { return current_input_mode; }
     
     // 语言设置
@@ -91,13 +93,7 @@ public:
     void setFastMode(bool enable);
     bool isFastMode() const { return fast_mode; }
     
-    // OpenAI API设置
-    void setUseOpenAI(bool enable);
-    bool isUsingOpenAI() const;
-    void setOpenAIServerURL(const std::string& url);
-    std::string getOpenAIServerURL() const;
-    void setOpenAIModel(const std::string& model);
-    std::string getOpenAIModel() const;
+
     
     // 实时分段设置
     void setRealtimeMode(bool enable);
@@ -108,6 +104,7 @@ public:
     // 添加识别模式设置方法
     void setRecognitionMode(RecognitionMode mode);
     RecognitionMode getRecognitionMode() const { return current_recognition_mode; }
+    RecognitionMode getCurrentRecognitionMode() const { return current_recognition_mode; }
     
     // 添加精确服务器URL设置
     void setPreciseServerURL(const std::string& url);
@@ -119,7 +116,7 @@ public:
     // 发送到精确识别服务器
     bool sendToPreciseServer(const std::string& audio_file_path, const RecognitionParams& params);
 
-    void parallelOpenAIProcessor(const QString& result);
+
     
     // 媒体播放控制
     void startMediaPlayback(const QString& file_path);
@@ -154,11 +151,7 @@ public:
     // 连接媒体播放器信号
     void connectMediaPlayerSignals();
     
-    // OpenAI API 识别方法
-    bool processWithOpenAI(const std::string& audio_file_path);
-    
-    // 测试OpenAI API连接的方法
-    bool testOpenAIConnection();
+
     
     // 时间戳转换辅助函数
     static qint64 convertTimestampToMs(const std::chrono::system_clock::time_point& timestamp);
@@ -193,8 +186,8 @@ public:
     // 媒体控制方法
     bool startMediaPlayback();
     
-    // OpenAI API相关方法
-    void processFile(const std::string& file_path, bool useOpenAI = false);
+    // 文件处理方法
+    void processFile(const std::string& file_path);
     void processAudio(const std::string& audio_file_path);
     
     // 字幕相关方法
@@ -242,6 +235,9 @@ public:
     // 安全创建媒体播放器的方法
     void createMediaPlayerSafely();
     
+    // 在主线程中创建媒体播放器的内部方法
+    void createMediaPlayerInMainThread();
+    
     // 延迟初始化VAD实例（在Qt multimedia完全初始化后调用）
     bool initializeVADSafely();
     
@@ -250,6 +246,15 @@ public:
     
     // 重置AudioProcessor状态以准备重新启动
     void resetForRestart();
+    
+    // 检查是否有活跃的识别请求（用于GUI判断是否可以安全停止）
+    bool hasActiveRecognitionRequests() const;
+    
+    // 获取分段处理器引用
+    RealtimeSegmentHandler* getSegmentHandler() { return segment_handler.get(); }
+    
+    // 强制处理待处理的音频数据
+    void processPendingAudioData();
     
 public slots:
     // 从ResultMerger接收结果
@@ -316,6 +321,7 @@ private:
     // 输入模式设置
     InputMode current_input_mode;
     std::string current_file_path;
+    std::string current_stream_url;
     std::string temp_wav_path;
     
     // 语言设置
@@ -443,6 +449,10 @@ private:
     std::unordered_set<std::string> pushed_results_cache;  // 缓存已推送的结果hash
     std::mutex push_cache_mutex;  // 保护缓存的互斥锁
     
+    // 线程安全保护
+    std::mutex audio_processing_mutex;  // 保护音频处理相关资源的互斥锁
+    // 移除媒体播放器互斥锁，简化避免死锁
+    
     // 生成结果的唯一标识符的方法
     std::string generateResultHash(const QString& result, const std::string& source_type);
     
@@ -463,7 +473,7 @@ private:
     };
     
     std::unordered_map<int, RequestInfo> active_requests;
-    std::mutex active_requests_mutex;
+    mutable std::mutex active_requests_mutex;
     
     // 动态超时计算
     int calculateDynamicTimeout(qint64 file_size_bytes);
@@ -482,4 +492,7 @@ private:
     QString buildAdaptiveFFmpegCommand(const std::string& input_path, 
                                       const std::string& output_path,
                                       const AudioStreamInfo& stream_info);
+    
+    // 视频流音频提取
+    bool startStreamAudioExtraction();
 };

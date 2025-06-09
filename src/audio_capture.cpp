@@ -88,24 +88,21 @@ bool AudioCapture::start() {
     
     running = true;
     
-    // 改为单线程模式：直接在当前线程中处理音频，不创建新线程
-    // 这样可以避免多线程引起的音频失真问题
-    processAudioInCurrentThread(stream, frames_per_buffer, sample_rate);
+    // 改为异步处理模式：创建独立线程处理音频，避免阻塞主线程
+    processing_thread = std::make_unique<std::thread>([this, stream, frames_per_buffer, sample_rate]() {
+        processAudioInThread(stream, frames_per_buffer, sample_rate);
+    });
     
     return true;
 }
 
-// 新增方法：在当前线程中处理音频
-void AudioCapture::processAudioInCurrentThread(void* stream, int frames_per_buffer, int sample_rate) {
+// 重命名并修改为线程安全的异步处理方法
+void AudioCapture::processAudioInThread(void* stream, int frames_per_buffer, int sample_rate) {
     std::vector<float> buffer(frames_per_buffer);
-            LOG_INFO("Audio capture started (single-thread mode), segment length: " + 
+    LOG_INFO("Audio capture started (async thread mode), segment length: " + 
             std::to_string(frames_per_buffer * 1000.0 / sample_rate) + " 毫秒");
     
-    // 设置一个合理的处理循环次数，避免无限循环
-    int max_iterations = 1000; // 根据需要调整
-    int iteration_count = 0;
-    
-    while (running && iteration_count < max_iterations) {
+    while (running) {
         PaError err = Pa_ReadStream(stream, buffer.data(), frames_per_buffer);
         if (err != paNoError) {
             LOG_ERROR("读取音频数据失败: " + std::string(Pa_GetErrorText(err)));
@@ -120,8 +117,6 @@ void AudioCapture::processAudioInCurrentThread(void* stream, int frames_per_buff
         if (segmentation_enabled && segment_handler) {
             segment_handler->addBuffer(audio_buffer);
         }
-        
-        iteration_count++;
         
         // 添加短暂延迟，避免CPU占用过高
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -143,11 +138,17 @@ void AudioCapture::processAudioInCurrentThread(void* stream, int frames_per_buff
     Pa_CloseStream(stream);
     Pa_Terminate();
     
-    LOG_INFO("Audio capture stopped (single-thread mode)");
+    LOG_INFO("Audio capture stopped (async thread mode)");
 }
 
 void AudioCapture::stop() {
     running = false;
+    
+    // 等待音频处理线程结束
+    if (processing_thread && processing_thread->joinable()) {
+        processing_thread->join();
+        processing_thread.reset();
+    }
     
     // 停止分段处理器
     if (segment_handler) {
@@ -166,6 +167,11 @@ void AudioCapture::reset() {
     
     // 重置所有状态变量到初始状态
     running = false;
+    
+    // 确保线程已清理
+    if (processing_thread) {
+        processing_thread.reset();
+    }
     
     // 重置分段相关状态
     if (segment_handler) {

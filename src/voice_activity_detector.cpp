@@ -57,7 +57,7 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
             std::cout << "[VAD] 尝试创建WebRTC VAD实例 (第 " << (retry_count + 1) << " 次)..." << std::endl;
             
             if (!vad_instance) {
-                vad_instance = safeCreateVADInstance();
+            vad_instance = safeCreateVADInstance();
             }
             
             if (vad_instance) {
@@ -82,14 +82,14 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
                     rate_result = fvad_set_sample_rate(vad_instance, 8000);
                     if (rate_result >= 0) {
                         std::cout << "[VAD] 使用8kHz采样率作为回退" << std::endl;
-                    }
+                }
                 }
                 
                 // 只要其中一个配置成功，就认为可以使用
                 if (mode_result >= 0 || rate_result >= 0) {
                     std::cout << "[VAD] VAD配置成功 (模式: " << vad_mode << ")" << std::endl;
                     configuration_success = true;
-                    break; // 成功创建并配置
+                break; // 成功创建并配置
                 } else {
                     std::cerr << "[VAD] VAD配置完全失败，准备重试" << std::endl;
                     // 不立即销毁实例，先尝试下一次配置
@@ -99,9 +99,9 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
                 std::cerr << "[VAD] WebRTC VAD创建失败 (尝试 " << (retry_count + 1) << "/" << max_retries << ")" << std::endl;
             }
             
-            retry_count++;
+                retry_count++;
             if (!configuration_success && retry_count < max_retries) {
-                // 等待一小段时间后重试
+                    // 等待一小段时间后重试
                 std::this_thread::sleep_for(std::chrono::milliseconds(50 * retry_count));
             }
         }

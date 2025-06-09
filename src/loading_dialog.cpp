@@ -1,5 +1,7 @@
 #include "loading_dialog.h"
 #include <QApplication>
+#include <QThread>
+#include <QMetaObject>
 
 LoadingDialog::LoadingDialog(QWidget* parent)
     : QDialog(parent)
@@ -45,15 +47,36 @@ LoadingDialog::LoadingDialog(QWidget* parent)
 
 void LoadingDialog::setMessage(const QString& message)
 {
+    // 确保在主线程中更新GUI
+    if (QThread::currentThread() == this->thread()) {
+        messageLabel->setText(message);
+    } else {
+        QMetaObject::invokeMethod(this, [this, message]() {
     messageLabel->setText(message);
+        }, Qt::QueuedConnection);
+    }
 }
 
 void LoadingDialog::setProgress(int value)
 {
+    // 确保在主线程中更新GUI
+    if (QThread::currentThread() == this->thread()) {
+        progressBar->setValue(value);
+    } else {
+        QMetaObject::invokeMethod(this, [this, value]() {
     progressBar->setValue(value);
+        }, Qt::QueuedConnection);
+    }
 }
 
 void LoadingDialog::setMaximum(int maximum)
 {
+    // 确保在主线程中更新GUI
+    if (QThread::currentThread() == this->thread()) {
+        progressBar->setMaximum(maximum);
+    } else {
+        QMetaObject::invokeMethod(this, [this, maximum]() {
     progressBar->setMaximum(maximum);
+        }, Qt::QueuedConnection);
+    }
 } 
