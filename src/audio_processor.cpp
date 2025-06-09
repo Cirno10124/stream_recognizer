@@ -2848,8 +2848,8 @@ void AudioProcessor::setUseOpenAI(bool enable) {
         std::cout << "[INFO] segment_handler为空，无法设置OpenAI模式" << std::endl;
     }
     if (gui) {
-        std::cout << "[INFO] 正在更新GUI的OpenAI设置..." << std::endl;
-        gui->updateOpenAISettings(use_openai, openai_server_url);
+        std::cout << "[INFO] OpenAI设置已更新..." << std::endl;
+        // OpenAI GUI设置已移除
     } else {
         std::cout << "[INFO] gui为空，无法更新OpenAI设置" << std::endl;
     }
@@ -2862,9 +2862,7 @@ bool AudioProcessor::isUsingOpenAI() const {
 
 void AudioProcessor::setOpenAIServerURL(const std::string& url) {
     openai_server_url = url;
-    if (gui) {
-        gui->updateOpenAISettings(use_openai, openai_server_url);
-    }
+    // OpenAI GUI设置已移除
 }
 
 std::string AudioProcessor::getOpenAIServerURL() const { 
@@ -2873,9 +2871,7 @@ std::string AudioProcessor::getOpenAIServerURL() const {
 
 void AudioProcessor::setOpenAIModel(const std::string& model) { 
     openai_model = model;
-    if (gui) {
-        gui->updateOpenAIModel(openai_model);
-    }
+    // OpenAI GUI设置已移除
 }
 
 std::string AudioProcessor::getOpenAIModel() const { 

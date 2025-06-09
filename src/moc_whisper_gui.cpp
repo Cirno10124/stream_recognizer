@@ -83,7 +83,6 @@ static constexpr auto qt_meta_stringdata_ZN10WhisperGUIE = QtMocHelpers::stringD
     "stopRecording",
     "selectInputFile",
     "processFile",
-    "onUseOpenAIChanged",
     "onEnableSubtitlesChanged",
     "onSubtitlePositionChanged",
     "index",
@@ -119,7 +118,7 @@ Q_CONSTINIT static const uint qt_meta_data_ZN10WhisperGUIE[] = {
       12,       // revision
        0,       // classname
        0,    0, // classinfo
-      53,   14, // methods
+      52,   14, // methods
        0,    0, // properties
        0,    0, // enums/sets
        0,    0, // constructors
@@ -127,59 +126,58 @@ Q_CONSTINIT static const uint qt_meta_data_ZN10WhisperGUIE[] = {
        0,       // signalCount
 
  // slots: name, argc, parameters, tag, flags, initial metatype offsets
-       1,    1,  332,    2, 0x0a,    1 /* Public */,
-       4,    1,  335,    2, 0x0a,    3 /* Public */,
-       6,    1,  338,    2, 0x0a,    5 /* Public */,
-       8,    1,  341,    2, 0x0a,    7 /* Public */,
-      10,    1,  344,    2, 0x0a,    9 /* Public */,
-      11,    0,  347,    2, 0x0a,   11 /* Public */,
-      12,    0,  348,    2, 0x0a,   12 /* Public */,
-      13,    0,  349,    2, 0x0a,   13 /* Public */,
-      14,    0,  350,    2, 0x0a,   14 /* Public */,
-      15,    1,  351,    2, 0x0a,   15 /* Public */,
-      17,    1,  354,    2, 0x0a,   17 /* Public */,
-      19,    1,  357,    2, 0x0a,   19 /* Public */,
-      21,    0,  360,    2, 0x0a,   21 /* Public */,
-      22,    0,  361,    2, 0x0a,   22 /* Public */,
-      23,    0,  362,    2, 0x0a,   23 /* Public */,
-      24,    0,  363,    2, 0x0a,   24 /* Public */,
-      25,    1,  364,    2, 0x0a,   25 /* Public */,
-      26,    0,  367,    2, 0x0a,   27 /* Public */,
-      27,    0,  368,    2, 0x0a,   28 /* Public */,
-      28,    1,  369,    2, 0x0a,   29 /* Public */,
-      31,    1,  372,    2, 0x0a,   31 /* Public */,
-      32,    1,  375,    2, 0x0a,   33 /* Public */,
-      33,    2,  378,    2, 0x0a,   35 /* Public */,
-      36,    1,  383,    2, 0x0a,   38 /* Public */,
-      37,    1,  386,    2, 0x0a,   40 /* Public */,
-      38,    0,  389,    2, 0x0a,   42 /* Public */,
-      39,    1,  390,    2, 0x0a,   43 /* Public */,
-      40,    0,  393,    2, 0x0a,   45 /* Public */,
-      41,    0,  394,    2, 0x0a,   46 /* Public */,
-      42,    0,  395,    2, 0x0a,   47 /* Public */,
-      43,    0,  396,    2, 0x0a,   48 /* Public */,
-      44,    0,  397,    2, 0x0a,   49 /* Public */,
-      45,    1,  398,    2, 0x0a,   50 /* Public */,
-      46,    1,  401,    2, 0x0a,   52 /* Public */,
-      47,    1,  404,    2, 0x0a,   54 /* Public */,
-      48,    1,  407,    2, 0x0a,   56 /* Public */,
-      50,    1,  410,    2, 0x0a,   58 /* Public */,
-      51,    0,  413,    2, 0x0a,   60 /* Public */,
-      52,    1,  414,    2, 0x0a,   61 /* Public */,
-      53,    2,  417,    2, 0x0a,   63 /* Public */,
-      55,    1,  422,    2, 0x0a,   66 /* Public */,
-      57,    1,  425,    2, 0x0a,   68 /* Public */,
-      58,    0,  428,    2, 0x0a,   70 /* Public */,
-      59,    1,  429,    2, 0x0a,   71 /* Public */,
-      60,    0,  432,    2, 0x0a,   73 /* Public */,
-      61,    0,  433,    2, 0x0a,   74 /* Public */,
-      62,    1,  434,    2, 0x0a,   75 /* Public */,
-      63,    1,  437,    2, 0x0a,   77 /* Public */,
-      66,    0,  440,    2, 0x0a,   79 /* Public */,
-      67,    0,  441,    2, 0x0a,   80 /* Public */,
-      68,    0,  442,    2, 0x0a,   81 /* Public */,
-      69,    0,  443,    2, 0x0a,   82 /* Public */,
-      70,    0,  444,    2, 0x0a,   83 /* Public */,
+       1,    1,  326,    2, 0x0a,    1 /* Public */,
+       4,    1,  329,    2, 0x0a,    3 /* Public */,
+       6,    1,  332,    2, 0x0a,    5 /* Public */,
+       8,    1,  335,    2, 0x0a,    7 /* Public */,
+      10,    1,  338,    2, 0x0a,    9 /* Public */,
+      11,    0,  341,    2, 0x0a,   11 /* Public */,
+      12,    0,  342,    2, 0x0a,   12 /* Public */,
+      13,    0,  343,    2, 0x0a,   13 /* Public */,
+      14,    0,  344,    2, 0x0a,   14 /* Public */,
+      15,    1,  345,    2, 0x0a,   15 /* Public */,
+      17,    1,  348,    2, 0x0a,   17 /* Public */,
+      19,    1,  351,    2, 0x0a,   19 /* Public */,
+      21,    0,  354,    2, 0x0a,   21 /* Public */,
+      22,    0,  355,    2, 0x0a,   22 /* Public */,
+      23,    0,  356,    2, 0x0a,   23 /* Public */,
+      24,    0,  357,    2, 0x0a,   24 /* Public */,
+      25,    1,  358,    2, 0x0a,   25 /* Public */,
+      26,    0,  361,    2, 0x0a,   27 /* Public */,
+      27,    0,  362,    2, 0x0a,   28 /* Public */,
+      28,    1,  363,    2, 0x0a,   29 /* Public */,
+      31,    1,  366,    2, 0x0a,   31 /* Public */,
+      32,    1,  369,    2, 0x0a,   33 /* Public */,
+      33,    2,  372,    2, 0x0a,   35 /* Public */,
+      36,    1,  377,    2, 0x0a,   38 /* Public */,
+      37,    1,  380,    2, 0x0a,   40 /* Public */,
+      38,    0,  383,    2, 0x0a,   42 /* Public */,
+      39,    1,  384,    2, 0x0a,   43 /* Public */,
+      40,    0,  387,    2, 0x0a,   45 /* Public */,
+      41,    0,  388,    2, 0x0a,   46 /* Public */,
+      42,    0,  389,    2, 0x0a,   47 /* Public */,
+      43,    0,  390,    2, 0x0a,   48 /* Public */,
+      44,    0,  391,    2, 0x0a,   49 /* Public */,
+      45,    1,  392,    2, 0x0a,   50 /* Public */,
+      46,    1,  395,    2, 0x0a,   52 /* Public */,
+      47,    1,  398,    2, 0x0a,   54 /* Public */,
+      49,    1,  401,    2, 0x0a,   56 /* Public */,
+      50,    0,  404,    2, 0x0a,   58 /* Public */,
+      51,    1,  405,    2, 0x0a,   59 /* Public */,
+      52,    2,  408,    2, 0x0a,   61 /* Public */,
+      54,    1,  413,    2, 0x0a,   64 /* Public */,
+      56,    1,  416,    2, 0x0a,   66 /* Public */,
+      57,    0,  419,    2, 0x0a,   68 /* Public */,
+      58,    1,  420,    2, 0x0a,   69 /* Public */,
+      59,    0,  423,    2, 0x0a,   71 /* Public */,
+      60,    0,  424,    2, 0x0a,   72 /* Public */,
+      61,    1,  425,    2, 0x0a,   73 /* Public */,
+      62,    1,  428,    2, 0x0a,   75 /* Public */,
+      65,    0,  431,    2, 0x0a,   77 /* Public */,
+      66,    0,  432,    2, 0x0a,   78 /* Public */,
+      67,    0,  433,    2, 0x0a,   79 /* Public */,
+      68,    0,  434,    2, 0x0a,   80 /* Public */,
+      69,    0,  435,    2, 0x0a,   81 /* Public */,
 
  // slots: parameters
     QMetaType::Void, QMetaType::QString,    3,
@@ -216,25 +214,24 @@ Q_CONSTINIT static const uint qt_meta_data_ZN10WhisperGUIE[] = {
     QMetaType::Void,
     QMetaType::Void, QMetaType::QString,   16,
     QMetaType::Void, QMetaType::Int,   30,
-    QMetaType::Void, QMetaType::Int,   30,
-    QMetaType::Void, QMetaType::Int,   49,
+    QMetaType::Void, QMetaType::Int,   48,
     QMetaType::Void, QMetaType::Int,   30,
     QMetaType::Void,
     QMetaType::Void, QMetaType::QString,    3,
-    QMetaType::Void, QMetaType::QString, QMetaType::Bool,   16,   54,
-    QMetaType::Void, 0x80000000 | 56,    9,
-    QMetaType::Void, 0x80000000 | 56,    9,
+    QMetaType::Void, QMetaType::QString, QMetaType::Bool,   16,   53,
+    QMetaType::Void, 0x80000000 | 55,    9,
+    QMetaType::Void, 0x80000000 | 55,    9,
     QMetaType::Void,
     QMetaType::Void, QMetaType::QString,   16,
     QMetaType::Void,
     QMetaType::Void,
-    QMetaType::Void, QMetaType::Int,   49,
-    QMetaType::Void, 0x80000000 | 64,   65,
+    QMetaType::Void, QMetaType::Int,   48,
+    QMetaType::Void, 0x80000000 | 63,   64,
     QMetaType::Void,
     QMetaType::Void,
     QMetaType::Void,
     QMetaType::Void,
-    0x80000000 | 64,
+    0x80000000 | 63,
 
        0        // eod
 };
@@ -332,9 +329,6 @@ Q_CONSTINIT const QMetaObject WhisperGUI::staticMetaObject = { {
         // method 'processFile'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
         QtPrivate::TypeAndForceComplete<const QString &, std::false_type>,
-        // method 'onUseOpenAIChanged'
-        QtPrivate::TypeAndForceComplete<void, std::false_type>,
-        QtPrivate::TypeAndForceComplete<int, std::false_type>,
         // method 'onEnableSubtitlesChanged'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
         QtPrivate::TypeAndForceComplete<int, std::false_type>,
@@ -426,26 +420,25 @@ void WhisperGUI::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, 
         case 30: _t->stopRecording(); break;
         case 31: _t->selectInputFile(); break;
         case 32: _t->processFile((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 33: _t->onUseOpenAIChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
-        case 34: _t->onEnableSubtitlesChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
-        case 35: _t->onSubtitlePositionChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
-        case 36: _t->onDualSubtitlesChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
-        case 37: _t->onExportSubtitles(); break;
-        case 38: _t->onSubtitleTextChanged((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 39: _t->onSubtitleExported((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[2]))); break;
-        case 40: _t->onRecognitionResult((*reinterpret_cast< std::add_pointer_t<std::string>>(_a[1]))); break;
-        case 41: _t->onTranslationResult((*reinterpret_cast< std::add_pointer_t<std::string>>(_a[1]))); break;
-        case 42: _t->onUpdatePosition(); break;
-        case 43: _t->onTemporaryFileCreated((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 44: _t->onProcessingFullyStopped(); break;
-        case 45: _t->showSettingsDialog(); break;
-        case 46: _t->onRecognitionModeChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
-        case 47: _t->showVideoWidget((*reinterpret_cast< std::add_pointer_t<QVideoWidget*>>(_a[1]))); break;
-        case 48: _t->prepareVideoWidget(); break;
-        case 49: _t->onStreamUrlChanged(); break;
-        case 50: _t->validateStreamConnection(); break;
-        case 51: _t->onStreamValidationFinished(); break;
-        case 52: { QVideoWidget* _r = _t->getVideoWidget();
+        case 33: _t->onEnableSubtitlesChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
+        case 34: _t->onSubtitlePositionChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
+        case 35: _t->onDualSubtitlesChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
+        case 36: _t->onExportSubtitles(); break;
+        case 37: _t->onSubtitleTextChanged((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 38: _t->onSubtitleExported((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[2]))); break;
+        case 39: _t->onRecognitionResult((*reinterpret_cast< std::add_pointer_t<std::string>>(_a[1]))); break;
+        case 40: _t->onTranslationResult((*reinterpret_cast< std::add_pointer_t<std::string>>(_a[1]))); break;
+        case 41: _t->onUpdatePosition(); break;
+        case 42: _t->onTemporaryFileCreated((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 43: _t->onProcessingFullyStopped(); break;
+        case 44: _t->showSettingsDialog(); break;
+        case 45: _t->onRecognitionModeChanged((*reinterpret_cast< std::add_pointer_t<int>>(_a[1]))); break;
+        case 46: _t->showVideoWidget((*reinterpret_cast< std::add_pointer_t<QVideoWidget*>>(_a[1]))); break;
+        case 47: _t->prepareVideoWidget(); break;
+        case 48: _t->onStreamUrlChanged(); break;
+        case 49: _t->validateStreamConnection(); break;
+        case 50: _t->onStreamValidationFinished(); break;
+        case 51: { QVideoWidget* _r = _t->getVideoWidget();
             if (_a[0]) *reinterpret_cast< QVideoWidget**>(_a[0]) = std::move(_r); }  break;
         default: ;
         }
@@ -471,14 +464,14 @@ int WhisperGUI::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 53)
+        if (_id < 52)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 53;
+        _id -= 52;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 53)
+        if (_id < 52)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 53;
+        _id -= 52;
     }
     return _id;
 }

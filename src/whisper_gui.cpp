@@ -509,7 +509,7 @@ void WhisperGUI::setupConnections() {
     // 连接识别结果信号
     connect(audioProcessor, &AudioProcessor::recognitionResultReady, this, &WhisperGUI::appendFinalOutput);
     //connect(audioProcessor, &AudioProcessor::translationResultReady, this, &WhisperGUI::appendFinalOutput);
-
+    connect(audioProcessor, &AudioProcessor::openAIResultReady, this, &WhisperGUI::appendFinalOutput);
     connect(audioProcessor, &AudioProcessor::preciseServerResultReady, this, &WhisperGUI::appendFinalOutput);
     
     // 连接处理完全停止的信号
@@ -1097,7 +1097,11 @@ void WhisperGUI::onTemporaryFileCreated(const QString& filePath) {
     
     appendLogMessage("Temporary file created: " + filePath);
     
-
+    // 检查是否启用了OpenAI API
+    if (!audioProcessor->isUsingOpenAI()) {
+        appendLogMessage("OpenAI API processing skipped (disabled)");
+        return;
+    }
     
     // 注意: 我们不再在这里处理文件，因为在AudioProcessor中已经处理过了
     // 分段处理模式下，文件会直接由AudioProcessor处理
@@ -1151,6 +1155,7 @@ void WhisperGUI::processFile(const QString& filePath) {
     }
 }
 
+// 新增：处理OpenAI API开关状态变化
 
 
 // 实现原有的 startRecording 方法 (在 onStartButtonClicked 之外单独保留)
@@ -1585,6 +1590,121 @@ void WhisperGUI::onUpdatePosition()
     }
 }
 
+void WhisperGUI::onOpenAIResultReady(const QString& result)
+{
+    static int resultCounter = 0;
+    resultCounter++;
+    
+    // Add more detailed logging
+    LOG_INFO("==== onOpenAIResultReady slot function called ====");
+    LOG_INFO("Received result #" + std::to_string(resultCounter) + ", length: " + 
+             std::to_string(result.length()) + " characters");
+    
+    // If the result is empty, log and return
+    if (result.isEmpty()) {
+        LOG_WARNING("Empty result received, cannot process");
+        return;
+    }
+    
+    // Record the first few characters of the result for debugging
+    QString preview = result.length() > 50 ? result.left(50) + "..." : result;
+    LOG_INFO("Result preview: " + preview.toStdString());
+    
+    // Directly add the result to the OpenAI output area, skipping unnecessary processing
+            LOG_INFO("Calling appendFinalOutput to display result");
+        appendFinalOutput(result);
+    
+    // If subtitles are enabled, add the recognition result to the subtitle manager
+    if (enableSubtitlesCheckBox && enableSubtitlesCheckBox->isChecked() && subtitleManager) {
+        qint64 timestamp = mediaPlayer ? mediaPlayer->position() : 0;
+        LOG_INFO("Adding subtitle, timestamp: " + std::to_string(timestamp));
+        subtitleManager->addSubtitle(timestamp, timestamp + 5000, result, false);
+        subtitleManager->updateSubtitleDisplay(timestamp);
+    }
+    
+    LOG_INFO("==== onOpenAIResultReady slot function processing completed ====");
+}
+
+// 添加一个新的函数用于验证和调试OpenAI API连接
+void WhisperGUI::checkOpenAIAPIConnection() {
+    appendLogMessage("Checking OpenAI API connection...");
+    
+    // 显示等待状态
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    
+    // 使用新添加的测试方法
+    bool success = audioProcessor->testOpenAIConnection();
+    
+    // 恢复鼠标状态
+    QApplication::restoreOverrideCursor();
+    
+    if (success) {
+        appendLogMessage("OpenAI API connection test successful!");
+        QMessageBox::information(this, "Connection Successful", "OpenAI API server connection test successful!");
+    } else {
+        appendLogMessage("OpenAI API connection test failed!");
+        
+        // 构建详细的错误消息
+        QString errorMsg = "Failed to connect to OpenAI API server.\n\n";
+        errorMsg += "Please check:\n";
+        errorMsg += "1. Is the API server running at: " + QString::fromStdString(audioProcessor->getOpenAIServerURL()) + "\n";
+        errorMsg += "2. Is your network connection working properly\n";
+        errorMsg += "3. Is there any firewall or security software blocking the connection\n\n";
+        errorMsg += "Would you like to modify the server address?";
+        
+        QMessageBox::StandardButton reply;
+        reply = QMessageBox::critical(this, "Connection Failed", 
+                                    errorMsg,
+                                    QMessageBox::Yes | QMessageBox::No);
+        
+        if (reply == QMessageBox::Yes) {
+            QString currentUrl = QString::fromStdString(audioProcessor->getOpenAIServerURL());
+            bool ok;
+            QString newUrl = QInputDialog::getText(this, "Modify Server URL",
+                                                "Enter OpenAI API server address:",
+                                                QLineEdit::Normal,
+                                                currentUrl, &ok);
+            if (ok && !newUrl.isEmpty()) {
+                audioProcessor->setOpenAIServerURL(newUrl.toStdString());
+                appendLogMessage("API server address updated to: " + newUrl);
+            }
+        }
+    }
+}
+
+// 修改handleOpenAIError方法，增加API检查按钮
+void WhisperGUI::handleOpenAIError(const QString& error) {
+    // 记录错误信息
+    QString errorMessage = "OpenAI API Error: " + error;
+    appendLogMessage(errorMessage);
+    
+    // 创建包含详细解决步骤的错误信息
+    QString detailedError = "<p><b>OpenAI API Call Failed</b></p>";
+    detailedError += "<p>" + error + "</p>";
+    detailedError += "<p>Please check the following:</p>";
+    detailedError += "<ol>";
+    detailedError += "<li>Confirm Python API server is running (python sre.py)</li>";
+    detailedError += "<li>Check if server URL is correct, should be: <code>http://127.0.0.1:5000/transcribe</code></li>";
+    detailedError += "<li>Verify a valid OpenAI API key is set (OPENAI_API_KEY environment variable)</li>";
+    detailedError += "<li>Check Python server console for error messages</li>";
+    detailedError += "</ol>";
+    
+    // 自定义错误对话框，添加检查连接按钮
+    QMessageBox msgBox(QMessageBox::Critical, "OpenAI API Error", detailedError);
+    msgBox.setTextFormat(Qt::RichText);
+    
+    // 添加检查连接按钮
+    QPushButton* checkButton = msgBox.addButton("Check API Connection", QMessageBox::ActionRole);
+    msgBox.addButton(QMessageBox::Ok);
+    
+    msgBox.exec();
+    
+    // 如果用户点击了检查连接按钮
+    if (msgBox.clickedButton() == checkButton) {
+        checkOpenAIAPIConnection();
+    }
+}
+
 
 
 void WhisperGUI::onProcessingFullyStopped() {
@@ -1769,8 +1889,6 @@ void WhisperGUI::showSettingsDialog() {
     
     serverSettingsLayout->addLayout(preciseServerLayout);
     
-
-    
     serverSettingsGroup->setLayout(serverSettingsLayout);
     
     // VAD设置组
@@ -1937,10 +2055,6 @@ void WhisperGUI::onRecognitionModeChanged(int index) {
         
         // 保存识别模式到配置文件
         saveRecognitionModeToConfig(mode);
-        
-        // 实时分段控件已移除
-        
-
     }
 }
 
@@ -2306,6 +2420,8 @@ void WhisperGUI::loadLastRecognitionMode() {
         
         // 根据模式设置下拉框的选择
         int comboIndex = 0;  // 默认选择快速识别
+        RecognitionMode actualMode = lastMode;
+        
         switch (lastMode) {
         case RecognitionMode::FAST_RECOGNITION:
             comboIndex = 0;
@@ -2313,7 +2429,12 @@ void WhisperGUI::loadLastRecognitionMode() {
         case RecognitionMode::PRECISE_RECOGNITION:
             comboIndex = 1;
             break;
-
+        case RecognitionMode::OPENAI_RECOGNITION:
+            // OpenAI模式已移除，回退到快速识别
+            comboIndex = 0;
+            actualMode = RecognitionMode::FAST_RECOGNITION;
+            appendLogMessage("OpenAI mode detected in config, falling back to Fast Recognition");
+            break;
         }
         
         // 设置下拉框选择并触发相应的事件
@@ -2321,7 +2442,7 @@ void WhisperGUI::loadLastRecognitionMode() {
         
         // 同步设置AudioProcessor的识别模式
         if (audioProcessor) {
-            audioProcessor->setRecognitionMode(lastMode);
+            audioProcessor->setRecognitionMode(actualMode);
         }
         
         appendLogMessage("Loaded last recognition mode from config");

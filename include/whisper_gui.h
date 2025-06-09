@@ -66,7 +66,9 @@ public slots:
     void appendFinalOutput(const QString& text);
     void appendLogMessage(const QString& message);
     void appendErrorMessage(const QString& error);
-
+    void onOpenAIResultReady(const QString& result);
+    void handleOpenAIError(const QString& error);
+    void checkOpenAIAPIConnection();
     void play();
     void pause();
     void stop();

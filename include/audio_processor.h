@@ -42,7 +42,8 @@ class WhisperGUI;
 // 添加识别模式枚举
 enum class RecognitionMode {
     FAST_RECOGNITION,    // 使用本地快速模型
-    PRECISE_RECOGNITION  // 使用服务端精确识别
+    PRECISE_RECOGNITION, // 使用服务端精确识别
+    OPENAI_RECOGNITION   // 使用OpenAI API
 };
 
 // 识别参数结构体
@@ -93,7 +94,13 @@ public:
     void setFastMode(bool enable);
     bool isFastMode() const { return fast_mode; }
     
-
+    // OpenAI API设置
+    void setUseOpenAI(bool enable);
+    bool isUsingOpenAI() const;
+    void setOpenAIServerURL(const std::string& url);
+    std::string getOpenAIServerURL() const;
+    void setOpenAIModel(const std::string& model);
+    std::string getOpenAIModel() const;
     
     // 实时分段设置
     void setRealtimeMode(bool enable);
@@ -116,7 +123,7 @@ public:
     // 发送到精确识别服务器
     bool sendToPreciseServer(const std::string& audio_file_path, const RecognitionParams& params);
 
-
+    void parallelOpenAIProcessor(const QString& result);
     
     // 媒体播放控制
     void startMediaPlayback(const QString& file_path);
@@ -151,7 +158,11 @@ public:
     // 连接媒体播放器信号
     void connectMediaPlayerSignals();
     
-
+    // OpenAI API 识别方法
+    bool processWithOpenAI(const std::string& audio_file_path);
+    
+    // 测试OpenAI API连接的方法
+    bool testOpenAIConnection();
     
     // 时间戳转换辅助函数
     static qint64 convertTimestampToMs(const std::chrono::system_clock::time_point& timestamp);
@@ -186,8 +197,8 @@ public:
     // 媒体控制方法
     bool startMediaPlayback();
     
-    // 文件处理方法
-    void processFile(const std::string& file_path);
+    // OpenAI API相关方法
+    void processFile(const std::string& file_path, bool useOpenAI = false);
     void processAudio(const std::string& audio_file_path);
     
     // 字幕相关方法
