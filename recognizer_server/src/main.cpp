@@ -306,6 +306,23 @@ public:
                                 params.temperature = paramsJson["temperature"].get<float>();
                                 std::cout << "设置temperature: " << params.temperature << std::endl;
                             }
+                            // 文本矫正参数
+                            if (paramsJson.contains("enable_correction")) {
+                                params.enable_correction = paramsJson["enable_correction"].get<bool>();
+                                std::cout << "设置文本矫正: " << (params.enable_correction ? "启用" : "禁用") << std::endl;
+                            }
+                            if (paramsJson.contains("correction_server")) {
+                                params.correction_server = paramsJson["correction_server"].get<std::string>();
+                                std::cout << "设置矫正服务器: " << params.correction_server << std::endl;
+                            }
+                            if (paramsJson.contains("correction_temperature")) {
+                                params.correction_temperature = paramsJson["correction_temperature"].get<float>();
+                                std::cout << "设置矫正温度: " << params.correction_temperature << std::endl;
+                            }
+                            if (paramsJson.contains("correction_max_tokens")) {
+                                params.correction_max_tokens = paramsJson["correction_max_tokens"].get<int>();
+                                std::cout << "设置矫正最大tokens: " << params.correction_max_tokens << std::endl;
+                            }
                         } catch(const std::exception& e) {
                             // 如果解析失败，使用默认参数
                             std::cerr << "解析params参数失败: " << e.what() << std::endl;
@@ -332,9 +349,24 @@ public:
                     json response = {
                         {"success", result.success},
                         {"text", result.text},
+                        {"original_text", result.original_text},
                         {"confidence", result.confidence},
-                        {"language", params.language}
+                        {"language", params.language},
+                        {"processing_time_ms", result.processing_time_ms}
                     };
+                    
+                    // 添加文本矫正相关信息
+                    if (params.enable_correction) {
+                        response["correction"] = {
+                            {"was_corrected", result.was_corrected},
+                            {"correction_confidence", result.correction_confidence},
+                            {"correction_time_ms", result.correction_time_ms}
+                        };
+                        
+                        if (!result.correction_error.empty()) {
+                            response["correction"]["error"] = result.correction_error;
+                        }
+                    }
                     
                     if (!result.success) {
                         response["error"] = result.error_message;
@@ -374,6 +406,12 @@ public:
                 params.beam_size = request_data.value("beam_size", 5);
                 params.temperature = request_data.value("temperature", 0.0f);
                 
+                // 文本矫正参数
+                params.enable_correction = request_data.value("enable_correction", false);
+                params.correction_server = request_data.value("correction_server", "http://localhost:8000");
+                params.correction_temperature = request_data.value("correction_temperature", 0.3f);
+                params.correction_max_tokens = request_data.value("correction_max_tokens", 512);
+                
                 std::cout << "使用JSON参数执行识别，文件: " << file_path << std::endl;
                 
                 // 执行识别
@@ -384,9 +422,24 @@ public:
                 json response = {
                     {"success", result.success},
                     {"text", result.text},
+                    {"original_text", result.original_text},
                     {"confidence", result.confidence},
-                    {"language", params.language}
+                    {"language", params.language},
+                    {"processing_time_ms", result.processing_time_ms}
                 };
+                
+                // 添加文本矫正相关信息
+                if (params.enable_correction) {
+                    response["correction"] = {
+                        {"was_corrected", result.was_corrected},
+                        {"correction_confidence", result.correction_confidence},
+                        {"correction_time_ms", result.correction_time_ms}
+                    };
+                    
+                    if (!result.correction_error.empty()) {
+                        response["correction"]["error"] = result.correction_error;
+                    }
+                }
                 
                 if (!result.success) {
                     response["error"] = result.error_message;

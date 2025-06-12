@@ -164,16 +164,19 @@
     <ClCompile Include="src\config_manager.cpp" />
     <ClCompile Include="src\loading_dialog.cpp" />
     <ClCompile Include="src\log_utils.cpp" />
+    <ClCompile Include="src\memory_serializer.cpp" />
     <ClCompile Include="src\moc_audio_capture.cpp" />
     <ClCompile Include="src\moc_audio_processor.cpp" />
     <ClCompile Include="src\moc_loading_dialog.cpp" />
     <ClCompile Include="src\moc_log_utils.cpp" />
+    <ClCompile Include="src\moc_output_corrector.cpp" />
     <ClCompile Include="src\moc_parallel_openai_processor.cpp" />
     <ClCompile Include="src\moc_realtime_segment_handler.cpp" />
     <ClCompile Include="src\moc_result_merger.cpp" />
     <ClCompile Include="src\moc_subtitle_manager.cpp" />
     <ClCompile Include="src\moc_voice_activity_detector.cpp" />
     <ClCompile Include="src\moc_whisper_gui.cpp" />
+    <ClCompile Include="src\output_corrector.cpp" />
     <ClCompile Include="src\parallel_openai_processor.cpp" />
     <ClCompile Include="src\realtime_segment_handler.cpp" />
     <ClCompile Include="src\recognizer.cpp" />
@@ -197,6 +200,8 @@
     <ClInclude Include="include\ggml.h" />
     <ClInclude Include="include\loading_dialog.h" />
     <ClInclude Include="include\log_utils.h" />
+    <ClInclude Include="include\memory_serializer.h" />
+    <ClInclude Include="include\output_corrector.h" />
     <ClInclude Include="include\parallel_openai_processor.h" />
     <ClInclude Include="include\realtime_segment_handler.h" />
     <ClInclude Include="include\result_merger.h" />
@@ -205,9 +210,6 @@
     <ClInclude Include="include\whisper.h" />
     <ClInclude Include="include\whisper_gui.h" />
     <ClInclude Include="libfvad-1.0\include\fvad.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="include\audio_processor.h.bak" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

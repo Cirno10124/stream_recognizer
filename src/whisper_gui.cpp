@@ -37,6 +37,7 @@
 #include <QGroupBox>
 #include <QSizePolicy>
 #include <QProgressBar>
+#include "memory_serializer.h"
 //#include <subtitle_manager.h>
 //#include <consoleapi2.h>
 //#include <WinNls.h>
@@ -59,6 +60,7 @@ WhisperGUI::WhisperGUI(QWidget* parent)
       subtitleLabel(nullptr),
       subtitleManager(nullptr),
       audioProcessor(nullptr),
+      audioProcessorOwnedByGUI(false),
       streamValidator(nullptr),
       streamValidationTimer(nullptr),
       streamUrlLabel(nullptr),
@@ -73,7 +75,9 @@ WhisperGUI::WhisperGUI(QWidget* parent)
     
     // 简化初始化过程，只设置基本属性
     setWindowTitle("Whisper Speech Recognition");
-    resize(1024, 768);
+    // 设置更适中的初始窗口大小，适应不同屏幕
+    resize(800, 600);
+    setMinimumSize(640, 480);  // 设置最小窗口大小
     
     // 增加延迟时间，确保Qt完全初始化
     QTimer::singleShot(4000, this, &WhisperGUI::safeInitialize);
@@ -91,8 +95,14 @@ void WhisperGUI::safeInitialize() {
         // 初始化UI
         setupUI();
         
-        // 创建音频处理器
-        audioProcessor = new AudioProcessor(this, this);
+        // 如果还没有设置AudioProcessor，则创建一个（向后兼容）
+        if (!audioProcessor) {
+            audioProcessor = new AudioProcessor(this, this);
+            audioProcessorOwnedByGUI = true;  // 由GUI创建和拥有
+            LOG_INFO("WhisperGUI: 创建了新的AudioProcessor实例（向后兼容模式）");
+        } else {
+            LOG_INFO("WhisperGUI: 使用外部提供的AudioProcessor实例");
+        }
         
         // 应用全局GPU设置
         extern bool g_use_gpu;
@@ -200,6 +210,18 @@ void WhisperGUI::setupBetterFont() {
     }
 }
 
+void WhisperGUI::setAudioProcessor(AudioProcessor* processor) {
+    // 如果已经有AudioProcessor且由GUI拥有，先清理
+    if (audioProcessor && audioProcessorOwnedByGUI) {
+        LOG_WARNING("WhisperGUI: 替换现有的自有AudioProcessor实例");
+        delete audioProcessor;
+    }
+    
+    audioProcessor = processor;
+    audioProcessorOwnedByGUI = false;  // 外部提供的，不由GUI拥有
+    LOG_INFO("WhisperGUI: 外部AudioProcessor实例已设置");
+}
+
 WhisperGUI::~WhisperGUI() {
     // 清理配置对话框
     if (s_settingsDialog) {
@@ -208,7 +230,15 @@ WhisperGUI::~WhisperGUI() {
     }
     
     cleanupMediaPlayer();
-    delete audioProcessor;
+    
+    // 只有在GUI拥有AudioProcessor的情况下才删除
+    if (audioProcessor && audioProcessorOwnedByGUI) {
+        LOG_INFO("WhisperGUI: 删除自有的AudioProcessor实例");
+        delete audioProcessor;
+    } else if (audioProcessor) {
+        LOG_INFO("WhisperGUI: 清理外部AudioProcessor引用（不删除）");
+    }
+    audioProcessor = nullptr;
 }
 
 void WhisperGUI::setupUI() {
@@ -370,21 +400,31 @@ void WhisperGUI::setupUI() {
     // 添加字幕布局到主布局
     mainLayout->addLayout(subtitleControlsLayout);
     
-    // 初始化字幕标签
-    subtitleLabel = new QLabel(this);
-    subtitleLabel->setAlignment(Qt::AlignCenter);
-    subtitleLabel->setStyleSheet("QLabel { color: white; background-color: rgba(0, 0, 0, 128); padding: 2px; border-radius: 4px; }");
-    subtitleLabel->setWordWrap(true);
-    subtitleLabel->setTextFormat(Qt::RichText);
+    // 矫正控制区域
+    QHBoxLayout* correctionControlsLayout = new QHBoxLayout();
     
-    // 初始字幕标签位于视频底部
-    QVBoxLayout* videoContainerLayout = new QVBoxLayout(videoWidget);
-    videoContainerLayout->addStretch();
-    videoContainerLayout->addWidget(subtitleLabel);
-    videoContainerLayout->setAlignment(subtitleLabel, Qt::AlignBottom | Qt::AlignHCenter);
-    videoContainerLayout->setContentsMargins(10, 10, 10, 10);
-
-
+          // 创建矫正控制组件
+      enableCorrectionCheckBox = new QCheckBox("Text Correction", this);
+      enableCorrectionCheckBox->setToolTip("Enable AI text correction to improve recognition accuracy");
+      
+      enableLineCorrectionCheckBox = new QCheckBox("Line Correction", this);
+      enableLineCorrectionCheckBox->setToolTip("Enable real-time line-by-line correction to optimize each output line");
+      enableLineCorrectionCheckBox->setEnabled(false); // 初始禁用，当总开关启用时才能使用
+      
+      // 矫正状态标签
+      correctionStatusLabel = new QLabel("Correction disabled", this);
+      correctionStatusLabel->setStyleSheet("QLabel { color: gray; font-size: 10px; }");
+      correctionStatusLabel->setMinimumWidth(150);
+      
+      // 组合矫正控件到布局
+      correctionControlsLayout->addWidget(new QLabel("AI Correction:", this));
+    correctionControlsLayout->addWidget(enableCorrectionCheckBox);
+    correctionControlsLayout->addWidget(enableLineCorrectionCheckBox);
+    correctionControlsLayout->addWidget(correctionStatusLabel);
+    correctionControlsLayout->addStretch();
+    
+    // 添加矫正布局到主布局
+    mainLayout->addLayout(correctionControlsLayout);
     
     // 创建两列输出布局
     QHBoxLayout* contentLayout = new QHBoxLayout();
@@ -427,8 +467,8 @@ void WhisperGUI::setupUI() {
     mainLayout->addLayout(contentLayout);
 
     
-    // 添加字幕标签
-    subtitleLabel = new QLabel("");
+    // 创建并设置字幕标签
+    subtitleLabel = new QLabel("", this);
     subtitleLabel->setAlignment(Qt::AlignCenter);
     subtitleLabel->setStyleSheet(
         "QLabel { "
@@ -442,24 +482,21 @@ void WhisperGUI::setupUI() {
         "}"
     );
     subtitleLabel->setWordWrap(true);
+    subtitleLabel->setTextFormat(Qt::RichText);
     subtitleLabel->setMinimumHeight(50);             // 确保最小高度
-    subtitleLabel->setVisible(false);
+    subtitleLabel->setVisible(false);                // 默认隐藏，直到启用字幕
     
     // 将字幕标签添加到视频窗口
     if (videoWidget) {
-        // 移除旧布局（如果有）
-        if (videoWidget->layout()) {
-            delete videoWidget->layout();
-        }
-        
         QVBoxLayout* videoLayout = new QVBoxLayout(videoWidget);
         videoLayout->setContentsMargins(10, 10, 10, 10);  // 设置内容边距
         videoLayout->addStretch();
         videoLayout->addWidget(subtitleLabel);
         videoLayout->setAlignment(subtitleLabel, Qt::AlignBottom | Qt::AlignHCenter);  // 居中对齐
         
-        // 确保字幕标签在布局中可见
-        subtitleLabel->setMinimumWidth(videoWidget->width() * 0.8);  // 设置最小宽度为视频宽度的80%
+        // 确保字幕标签在最顶层显示
+        subtitleLabel->raise();
+        subtitleLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);  // 鼠标事件穿透，不影响视频控制
         
         appendLogMessage("Subtitle label added to video layout");
     } else {
@@ -472,8 +509,13 @@ void WhisperGUI::setupUI() {
     
     // 设置媒体播放器输出
     mediaPlayer->setAudioOutput(audioOutput);
-    // 设置视频输出 - 使用videoWidget中的videoSink
+    // 使用串行分配器设置视频输出 - 使用videoWidget中的videoSink
+    MemorySerializer::getInstance().executeSerial([this]() {
+        if (mediaPlayer && videoWidget) {
     mediaPlayer->setVideoSink(videoWidget->videoSink());
+            LOG_INFO("GUI媒体播放器视频输出已通过串行分配器安全设置");
+        }
+    });
     
     // 初始化定时器
     positionTimer = new QTimer(this);
@@ -546,6 +588,15 @@ void WhisperGUI::setupConnections() {
     connect(recognitionModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), 
             this, &WhisperGUI::onRecognitionModeChanged);
     
+    // 连接矫正控制信号
+    connect(enableCorrectionCheckBox, &QCheckBox::toggled, this, &WhisperGUI::onCorrectionEnabledChanged);
+    connect(enableLineCorrectionCheckBox, &QCheckBox::toggled, this, &WhisperGUI::onLineCorrectionEnabledChanged);
+    
+    // 连接AudioProcessor的矫正状态信号
+    connect(audioProcessor, &AudioProcessor::correctionEnabledChanged, this, &WhisperGUI::onCorrectionEnabledChanged);
+    connect(audioProcessor, &AudioProcessor::lineCorrectionEnabledChanged, this, &WhisperGUI::onLineCorrectionEnabledChanged);
+    connect(audioProcessor, &AudioProcessor::correctionStatusUpdated, this, &WhisperGUI::onCorrectionStatusUpdated);
+    
     // 视频流输入连接
     if (streamUrlEdit) {
         connect(streamUrlEdit, &QLineEdit::editingFinished, this, &WhisperGUI::onStreamUrlChanged);
@@ -563,6 +614,31 @@ void WhisperGUI::setupConnections() {
     streamValidationTimer->setSingleShot(true);
     streamValidationTimer->setInterval(3000); // 3秒延迟验证
     connect(streamValidationTimer, &QTimer::timeout, this, &WhisperGUI::validateStreamConnection);
+    
+    // 初始化矫正控件状态（根据AudioProcessor当前状态）
+    if (audioProcessor) {
+        enableCorrectionCheckBox->setChecked(audioProcessor->isCorrectionEnabled());
+        enableLineCorrectionCheckBox->setChecked(audioProcessor->isLineCorrectionEnabled());
+        enableLineCorrectionCheckBox->setEnabled(audioProcessor->isCorrectionEnabled());
+        
+        // 初始化状态显示
+        bool correctionEnabled = audioProcessor->isCorrectionEnabled();
+        bool lineCorrectionEnabled = audioProcessor->isLineCorrectionEnabled();
+        
+        QString status;
+        if (correctionEnabled) {
+            status = "Text correction enabled";
+            if (lineCorrectionEnabled) {
+                status += ", line correction enabled";
+            }
+        } else {
+            status = "Correction disabled";
+        }
+        
+        correctionStatusLabel->setText(status);
+        correctionStatusLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }")
+                                           .arg(correctionEnabled ? "green" : "gray"));
+    }
     
     // 初始化位置定时器（之前可能遗漏了）
     if (!positionTimer) {
@@ -668,23 +744,21 @@ void WhisperGUI::onPlaybackStateChanged(QMediaPlayer::PlaybackState state) {
             
             // 确保字幕显示正确（如果启用）
             if (enableSubtitlesCheckBox && enableSubtitlesCheckBox->isChecked()) {
-                if (subtitleLabel) {
+                if (subtitleLabel && videoWidget) {
                     // 强制更新字幕标签大小和位置
                     QTimer::singleShot(100, this, [this]() {
                         if (subtitleLabel && videoWidget) {
                             // 确保字幕标签尺寸合适
-                            subtitleLabel->setMinimumWidth(videoWidget->width() * 0.8);
-                            subtitleLabel->adjustSize();
+                            int videoWidth = videoWidget->width();
+                            if (videoWidth > 0) {
+                                subtitleLabel->setMinimumWidth(videoWidth * 0.8);
+                                subtitleLabel->setMaximumWidth(videoWidth * 0.9);
+                            }
                             
-                            // 强制显示字幕标签
-                            subtitleLabel->setVisible(true);
-                            appendLogMessage("Subtitle label visibility enforced");
+                            appendLogMessage("Subtitle label size adjusted for playback");
                             
-                            // 如果在播放状态下字幕标签可见性被强制设置为测试文本，更改它
-                            subtitleLabel->setText("Playback Started");
-                            
-                            // 更新字幕显示
-                            if (subtitleManager) {
+                            // 更新字幕显示到当前播放位置
+                            if (subtitleManager && mediaPlayer) {
                                 subtitleManager->updateSubtitleDisplay(mediaPlayer->position());
                             }
                         }
@@ -1050,7 +1124,9 @@ void WhisperGUI::cleanupMediaPlayer() {
     qDebug() << "Cleaning up media player resources";
     
     // 先停止计时器以防止回调
-    positionTimer->stop();
+    if (positionTimer) {
+        positionTimer->stop();
+    }
     
     try {
         // 停止播放
@@ -1071,16 +1147,30 @@ void WhisperGUI::cleanupMediaPlayer() {
             mediaPlayer->setSource(QUrl());
         }
         
-        // 重置UI元素
+        // 重置UI元素 - 添加空指针检查
+        if (playPauseButton) {
         playPauseButton->setEnabled(false);
+        }
+        
+        if (positionSlider) {
         positionSlider->setEnabled(false);
-        timeLabel->setText("00:00");
-        durationLabel->setText("00:00");
         positionSlider->setRange(0, 0);
         positionSlider->setValue(0);
+        }
         
-        // 强制刷新UI以确保释放资源
+        if (timeLabel) {
+            timeLabel->setText("00:00");
+        }
+        
+        if (durationLabel) {
+            durationLabel->setText("00:00");
+        }
+        
+        // 强制刷新UI以确保释放资源 - 添加空指针检查
+        if (videoWidget) {
         videoWidget->update();
+        }
+        
         QCoreApplication::processEvents();
         
         qDebug() << "Media player resources cleaned up";
@@ -1361,23 +1451,32 @@ void WhisperGUI::stopRecording() {
 
 // 实现原有的 selectInputFile 方法 (在 onFileButtonClicked 之外单独保留)
 void WhisperGUI::selectInputFile() {
+    LOG_INFO("开始文件选择对话框");
+    
+    // 使用串行分配器确保文件对话框在主线程中创建
+    MemorySerializer::getInstance().executeSerial([this]() {
+        try {
     // 打开文件选择对话框
     QString filePath = QFileDialog::getOpenFileName(this, 
         "Select Input File", 
         QDir::homePath(), 
         "Media Files (*.wav *.mp3 *.ogg *.flac *.mp4 *.avi *.mkv);;All Files (*)");
     
+            LOG_INFO("文件选择对话框完成: " + filePath.toStdString());
+            
     if (filePath.isEmpty()) {
+                LOG_INFO("用户取消了文件选择");
         return;
     }
     
-    try {
-        // 处理选中的文件
+            // 在主线程中处理选中的文件
         processFile(filePath);
+            
+        } catch (const std::exception& e) {
+            LOG_ERROR("文件选择过程中发生异常: " + std::string(e.what()));
+            appendLogMessage("Error selecting file: " + QString::fromStdString(e.what()));
     }
-    catch (const std::exception& e) {
-        appendLogMessage("Error processing file: " + QString::fromStdString(e.what()));
-    }
+    });
 }
 
 
@@ -1391,38 +1490,6 @@ void WhisperGUI::onEnableSubtitlesChanged(int state)
     subtitlePositionComboBox->setEnabled(enabled);
     dualSubtitlesCheckBox->setEnabled(enabled);
     exportSubtitlesButton->setEnabled(enabled);
-    
-    // 更新字幕标签的可见性
-    if (subtitleLabel) {
-        subtitleLabel->setVisible(enabled);
-        
-        // 添加调试信息
-        if (enabled) {
-            appendLogMessage("Subtitle label is now visible");
-            
-            // 确保标签有内容以便测试可见性
-            subtitleLabel->setText("Test Subtitle");
-            appendLogMessage("Test subtitle text set");
-            
-            // 打印标签的几何信息和父组件信息
-            QRect geometry = subtitleLabel->geometry();
-            appendLogMessage(QString("Subtitle label geometry: x=%1, y=%2, w=%3, h=%4")
-                .arg(geometry.x()).arg(geometry.y())
-                .arg(geometry.width()).arg(geometry.height()));
-                
-            if (subtitleLabel->parentWidget()) {
-                appendLogMessage(QString::fromStdString("Subtitle label has parent: ") +
-                    subtitleLabel->parentWidget()->metaObject()->className());
-            } else {
-                appendLogMessage("Warning: Subtitle label has no parent widget");
-            }
-        } else {
-            appendLogMessage("Subtitle label is now hidden");
-            subtitleLabel->setText("");
-        }
-    } else {
-        appendLogMessage("Warning: Subtitle label is null");
-    }
     
     if (enabled && subtitleManager) {
         // 确保字幕管理器有有效的标签
@@ -1442,6 +1509,44 @@ void WhisperGUI::onEnableSubtitlesChanged(int state)
             appendLogMessage("Initial subtitle display updated at position: " + 
                 QString::number(mediaPlayer->position()) + "ms");
         }
+        
+        // 确保字幕标签在视频播放区域中正确显示
+        if (subtitleLabel && videoWidget) {
+            // 设置最小宽度为视频宽度的80%
+            QTimer::singleShot(100, this, [this]() {
+                int videoWidth = videoWidget->width();
+                if (videoWidth > 0) {
+                    subtitleLabel->setMinimumWidth(videoWidth * 0.8);
+                    subtitleLabel->setMaximumWidth(videoWidth * 0.9);
+                }
+                appendLogMessage("Subtitle label size adjusted for video widget");
+                
+                // 显示测试字幕2秒来确认显示正常
+                  subtitleLabel->setText("Subtitles Enabled");
+                subtitleLabel->setVisible(true);
+                appendLogMessage("Test subtitle displayed to verify functionality");
+                
+                // 2秒后清除测试字幕
+                QTimer::singleShot(2000, this, [this]() {
+                    if (subtitleManager) {
+                        // 更新到当前播放位置的实际字幕
+                        qint64 currentPos = mediaPlayer ? mediaPlayer->position() : 0;
+                        subtitleManager->updateSubtitleDisplay(currentPos);
+                    } else {
+                        subtitleLabel->setText("");
+                        subtitleLabel->setVisible(false);
+                    }
+                    appendLogMessage("Test subtitle cleared");
+                });
+            });
+        }
+    } else if (!enabled) {
+        // 如果禁用字幕，隐藏字幕标签并清空内容
+        if (subtitleLabel) {
+            subtitleLabel->setVisible(false);
+            subtitleLabel->setText("");
+            appendLogMessage("Subtitle label hidden and cleared");
+        }
     }
 }
 
@@ -1453,24 +1558,31 @@ void WhisperGUI::onSubtitlePositionChanged(int index)
     subtitleManager->setSubtitlePosition(position);
     
     // 更新字幕标签位置
-    if (videoWidget) {
-        QLayout* videoLayout = videoWidget->layout();
+    if (videoWidget && subtitleLabel) {
+        QVBoxLayout* videoLayout = qobject_cast<QVBoxLayout*>(videoWidget->layout());
         if (videoLayout) {
+            // 移除字幕标签但不删除
             videoLayout->removeWidget(subtitleLabel);
-            QVBoxLayout* newLayout = new QVBoxLayout();
             
-            if (position == SubtitlePosition::Top) {
-                newLayout->addWidget(subtitleLabel);
-                newLayout->addStretch();
-                newLayout->setAlignment(subtitleLabel, Qt::AlignTop);
-            } else {
-                newLayout->addStretch();
-                newLayout->addWidget(subtitleLabel);
-                newLayout->setAlignment(subtitleLabel, Qt::AlignBottom);
+            // 清除现有布局项
+            QLayoutItem* child;
+            while ((child = videoLayout->takeAt(0)) != nullptr) {
+                delete child;
             }
             
-            delete videoWidget->layout();
-            videoWidget->setLayout(newLayout);
+            // 根据位置重新添加布局项
+            if (position == SubtitlePosition::Top) {
+                videoLayout->addWidget(subtitleLabel);
+                videoLayout->addStretch();
+                videoLayout->setAlignment(subtitleLabel, Qt::AlignTop | Qt::AlignHCenter);
+            } else {
+                videoLayout->addStretch();
+                videoLayout->addWidget(subtitleLabel);
+                videoLayout->setAlignment(subtitleLabel, Qt::AlignBottom | Qt::AlignHCenter);
+            }
+            
+            // 设置布局边距
+            videoLayout->setContentsMargins(10, 10, 10, 10);
         }
     }
     
@@ -1516,21 +1628,24 @@ void WhisperGUI::onSubtitleTextChanged(const QString& text)
         // 仅当有文本时才显示字幕标签
         bool hasText = !text.isEmpty();
         
-        // 设置文本
-        subtitleLabel->setText(text);
-        
-        // 显示或隐藏字幕标签
-        subtitleLabel->setVisible(hasText);
-        
-        // 调整大小
-        subtitleLabel->adjustSize();
-        
-        // 记录日志
         if (hasText) {
+            // 设置文本
+            subtitleLabel->setText(text);
+            
+            // 显示字幕标签
+            subtitleLabel->setVisible(true);
+            
+            // 调整大小
+            subtitleLabel->adjustSize();
+            
+            // 记录日志
             QString logText = "Subtitle updated: " + (text.length() > 30 ? 
                 text.left(30) + "..." : text);
             appendLogMessage(logText);
         } else {
+            // 没有文本时隐藏字幕标签
+            subtitleLabel->setVisible(false);
+            subtitleLabel->setText("");
             appendLogMessage("Subtitle cleared");
         }
         
@@ -2090,21 +2205,32 @@ void WhisperGUI::showVideoWidget(QVideoWidget* widget) {
         // 将外部组件的视频接收器设置到我们的媒体播放器
         if (mediaPlayer && videoWidget) {
             try {
+                // 使用串行分配器安全设置视频接收器
+                MemorySerializer::getInstance().executeSerial([this, widget]() {
                 // 获取外部组件的视频接收器
                 QVideoSink* externalSink = widget->videoSink();
-                if (externalSink) {
+                    if (externalSink && mediaPlayer) {
                     // 将我们的媒体播放器连接到外部视频接收器
                     mediaPlayer->setVideoSink(externalSink);
-                    appendLogMessage("媒体播放器已连接到外部视频接收器");
+                        LOG_INFO("媒体播放器已通过串行分配器连接到外部视频接收器");
                 } else {
                     // 如果外部接收器无效，仍然使用我们自己的
-                    appendLogMessage("外部视频接收器无效，使用当前视频接收器");
+                        if (mediaPlayer && videoWidget) {
                     mediaPlayer->setVideoSink(videoWidget->videoSink());
+                            LOG_INFO("使用当前视频接收器，通过串行分配器设置");
                 }
+                    }
+                });
+                appendLogMessage("媒体播放器视频接收器已安全设置");
             } catch (const std::exception& e) {
                 appendLogMessage("连接视频接收器时出错: " + QString::fromStdString(e.what()));
-                // 出错时仍使用我们自己的视频接收器
+                // 出错时仍使用我们自己的视频接收器，通过串行分配器
+                MemorySerializer::getInstance().executeSerial([this]() {
+                    if (mediaPlayer && videoWidget) {
                 mediaPlayer->setVideoSink(videoWidget->videoSink());
+                        LOG_INFO("异常处理：已通过串行分配器重置为GUI视频接收器");
+                    }
+                });
             }
         }
     } else {
@@ -2114,9 +2240,14 @@ void WhisperGUI::showVideoWidget(QVideoWidget* widget) {
         // 确保我们的视频组件可见
         videoWidget->setVisible(true);
         
-        // 将媒体播放器连接到我们的视频组件
+        // 使用串行分配器将媒体播放器连接到我们的视频组件
         if (mediaPlayer) {
+            MemorySerializer::getInstance().executeSerial([this]() {
+                if (mediaPlayer && videoWidget) {
             mediaPlayer->setVideoSink(videoWidget->videoSink());
+                    LOG_INFO("媒体播放器已通过串行分配器连接到GUI视频组件");
+                }
+            });
         }
     }
     
@@ -2469,4 +2600,80 @@ void WhisperGUI::saveRecognitionModeToConfig(RecognitionMode mode) {
     } catch (const std::exception& e) {
         appendLogMessage(QString("Warning: Could not save recognition mode: ") + e.what());
     }
+}
+
+// 矫正控制槽函数实现
+void WhisperGUI::onCorrectionEnabledChanged(bool enabled) {
+    // 防止循环信号
+    if (enableCorrectionCheckBox->isChecked() != enabled) {
+        enableCorrectionCheckBox->blockSignals(true);
+        enableCorrectionCheckBox->setChecked(enabled);
+        enableCorrectionCheckBox->blockSignals(false);
+    }
+    
+    // 当文本矫正被禁用时，逐行矫正也应该被禁用
+    if (!enabled) {
+        enableLineCorrectionCheckBox->setChecked(false);
+        enableLineCorrectionCheckBox->setEnabled(false);
+    } else {
+        enableLineCorrectionCheckBox->setEnabled(true);
+    }
+    
+    // 如果信号来自GUI控件，更新AudioProcessor
+    if (sender() == enableCorrectionCheckBox && audioProcessor) {
+        audioProcessor->setCorrectionEnabled(enabled);
+    }
+    
+    // 更新状态显示
+    QString status = enabled ? "Text correction enabled" : "Text correction disabled";
+    correctionStatusLabel->setText(status);
+    correctionStatusLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }")
+                                       .arg(enabled ? "green" : "gray"));
+    
+    appendLogMessage(QString("Correction enabled: %1").arg(enabled ? "true" : "false"));
+}
+
+void WhisperGUI::onLineCorrectionEnabledChanged(bool enabled) {
+    // 防止循环信号
+    if (enableLineCorrectionCheckBox->isChecked() != enabled) {
+        enableLineCorrectionCheckBox->blockSignals(true);
+        enableLineCorrectionCheckBox->setChecked(enabled);
+        enableLineCorrectionCheckBox->blockSignals(false);
+    }
+    
+    // 如果信号来自GUI控件，更新AudioProcessor
+    if (sender() == enableLineCorrectionCheckBox && audioProcessor) {
+        audioProcessor->setLineCorrectionEnabled(enabled);
+    }
+    
+    // 更新状态显示
+    QString baseStatus = enableCorrectionCheckBox->isChecked() ? "Text correction enabled" : "Text correction disabled";
+    if (enableCorrectionCheckBox->isChecked() && enabled) {
+        correctionStatusLabel->setText(baseStatus + ", line correction enabled");
+    } else {
+        correctionStatusLabel->setText(baseStatus);
+    }
+    
+    appendLogMessage(QString("Line correction enabled: %1").arg(enabled ? "true" : "false"));
+}
+
+void WhisperGUI::onCorrectionStatusUpdated(const QString& status) {
+    // 更新状态标签
+    correctionStatusLabel->setText(status);
+    
+    // 根据状态内容设置颜色
+    QColor color = Qt::gray;
+    if (status.contains("启用") || status.contains("成功")) {
+        color = Qt::darkGreen;
+    } else if (status.contains("错误") || status.contains("失败")) {
+        color = Qt::red;
+    } else if (status.contains("警告")) {
+        color = Qt::darkYellow;
+    }
+    
+    correctionStatusLabel->setStyleSheet(QString("QLabel { color: %1; font-size: 10px; }")
+                                       .arg(color.name()));
+    
+    // 同时在日志中记录
+    appendLogMessage(QString("Correction status: %1").arg(status));
 }

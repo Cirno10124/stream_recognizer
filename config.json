@@ -5,20 +5,86 @@
         "keep_ms": 8000,
         "max_buffers": 1000,
         "sample_rate": 16000,
-        "step_ms": 3000
+        "segment_overlap_ms": 1000,
+        "segment_size_ms": 3500,
+        "step_ms": 3000,
+        "vad_threshold": 0.15
+    },
+    "gui": {
+        "correction_controls": {
+            "correction_button_text": "文本矫正",
+            "line_correction_button_text": "逐行矫正",
+            "real_time_updates": true,
+            "show_correction_panel": true,
+            "status_display": true
+        }
+    },
+    "logging": {
+        "correction_logs": true,
+        "level": "INFO",
+        "performance_logs": true
     },
     "models": {
         "fast_model": "models/ggml-medium.bin",
         "precise_model": "models/ggml-large-v3-turbo.bin",
         "translate_model": "models/ggml-base.bin"
     },
+    "output_correction": {
+        "async_processing": true,
+        "auto_check_service": true,
+        "context_lines": 3,
+        "enable_deduplication": true,
+        "enabled": false,
+        "max_retries": 3,
+        "max_tokens": 512,
+        "model_name": "deepseek-coder-7b-instruct-v1.5",
+        "server_url": "http://192.168.0.109:8000",
+        "temperature": 0.1,
+        "timeout": 30000,
+        "timeout_seconds": 30,
+        "user_control": {
+            "allow_user_override": true,
+            "description": "用户可以通过GUI开关控制矫正功能",
+            "show_correction_toggle": true,
+            "show_line_correction_toggle": true
+        }
+    },
     "recognition": {
         "dual_language": true,
-        "fast_mode": false,
         "input_file": "C:/FFOutput/world.execute(me);.wav",
         "language": "en",
+        "local_recognition": {
+            "correction": {
+                "description": "本地识别默认启用完整矫正功能",
+                "enabled": true,
+                "line_by_line_enabled": true
+            },
+            "enabled": true,
+            "model_path": "models/ggml-base.bin",
+            "use_gpu": true,
+            "vad_threshold": 0.15
+        },
+        "openai_mode": {
+            "correction": {
+                "description": "OpenAI模式启用基础矫正，不启用逐行矫正",
+                "enabled": true,
+                "line_by_line_enabled": false
+            },
+            "enabled": true,
+            "model": "whisper-1",
+            "server_url": "http://127.0.0.1:5000"
+        },
         "precise_server_url": "http://192.168.0.109:8080",
-        "recognition_mode": "precise",
+        "recognition_mode": "server",
+        "server_recognition": {
+            "correction": {
+                "description": "服务器识别模式结果已优化，默认不启用矫正",
+                "enabled": false,
+                "line_by_line_enabled": false
+            },
+            "enabled": true,
+            "server_url": "http://localhost:8080"
+        },
         "target_language": "en",
         "vad_threshold": 0.15
     }

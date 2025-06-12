@@ -2,13 +2,39 @@
 #include <whisper_gui.h>
 #include <fstream>
 #include <iomanip> // 添加iomanip头文件以使用std::setw
+
+// 内部序列化FastRecognizer创建函数，防止并行分配问题
+namespace {
+    std::unique_ptr<FastRecognizer> createFastRecognizerSafely(
+        const std::string& model_path, 
+        ResultQueue* input_queue,
+        const std::string& language,
+        bool use_gpu,
+        float vad_threshold) {
+        
+        static std::mutex creation_mutex;
+        std::lock_guard<std::mutex> lock(creation_mutex);
+        
+        // 添加短暂延迟以确保内存回收
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        
+        // 如果没有提供输入队列，创建一个临时的空队列
+        std::unique_ptr<ResultQueue> temp_queue;
+        if (!input_queue) {
+            temp_queue = std::make_unique<ResultQueue>();
+            input_queue = temp_queue.get();
+        }
+        
+        return std::make_unique<FastRecognizer>(model_path, input_queue, language, use_gpu, vad_threshold);
+    }
+}
+
 #include <QFile>
 #include <QDir>
 #include <QUrl>
 #include <QFileInfo>
 #include <QMediaDevices>
 #include <audio_processor.h>
-// #include <audio_handlers.h>  // 移除重复包含，已经在audio_processor.h中包含了
 #include <QMediaPlayer>
 #include <QAudioOutput>
 #include <QVideoWidget>
@@ -40,9 +66,17 @@
 #include <QTimer>
 #include <QMetaMethod>
 #include <QDateTime> // 添加QDateTime以支持时间戳生成
-#include <audio_processor.h>
 #include <random> // 添加随机数生成的头文件
 #include <QThread> // 添加QThread头文件用于线程检查
+#include <queue>   // 添加队列支持
+#include <condition_variable> // 添加条件变量支持
+#include <deque>   // 添加双端队列支持
+#include "memory_serializer.h" // 添加串行内存分配器
+
+// 添加CUDA头文件用于内存同步
+#ifdef GGML_USE_CUDA
+#include <cuda_runtime.h>
+#endif
 
 
 
@@ -239,8 +273,15 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
         
         LOG_INFO("加载配置参数...");
     
-    // 从配置加载所有参数
+    // 从配置加载所有参数 - 添加异常处理
+    try {
     initializeParameters();
+        LOG_INFO("配置参数加载成功");
+    } catch (const std::exception& e) {
+        LOG_ERROR("配置参数加载失败: " + std::string(e.what()));
+        // 使用默认配置继续执行
+        LOG_INFO("使用默认配置继续执行");
+    }
         
         // 初始化防重复推送缓存
         pushed_results_cache.clear();
@@ -261,9 +302,37 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
             logMessage(gui, "要使用精确识别，请在设置中切换识别模式");
         }
         
-        // 注册实例到全局跟踪集合
+        // 初始化矫正功能配置（从配置文件读取）
+        line_by_line_correction_enabled = false;  // 默认禁用，可通过配置启用
+        output_correction_enabled = false;        // 默认禁用，可通过配置启用
+        LOG_INFO("AudioProcessor构造函数：矫正功能配置已初始化");
+        
+        // 启动矫正线程（如果需要）
+        if (output_correction_enabled) {
+            startCorrectionThread();
+        }
+        
+        // 注册实例到全局跟踪集合，但限制实例数量
         {
             std::lock_guard<std::mutex> lock(instances_mutex);
+            
+            // 检查是否已有太多实例
+            if (all_instances.size() >= 2) {
+                LOG_WARNING("检测到过多AudioProcessor实例(" + std::to_string(all_instances.size()) + ")，清理旧实例");
+                
+                // 清理最旧的实例
+                auto oldest_instance = *all_instances.begin();
+                if (oldest_instance && oldest_instance != this) {
+                    LOG_INFO("清理最旧的AudioProcessor实例");
+                    try {
+                        oldest_instance->stopProcessing();
+                        // 不直接删除，让其自然析构
+                    } catch (...) {
+                        LOG_ERROR("清理旧实例时发生异常");
+                    }
+                }
+            }
+            
             all_instances.insert(this);
             LOG_INFO("AudioProcessor instance registered, current instance count: " + std::to_string(all_instances.size()));
         }
@@ -312,8 +381,7 @@ AudioProcessor::~AudioProcessor() {
         }
     }
     
-    // 设置析构标志，防止其他线程访问
-    static std::atomic<bool> destroying{false};
+    // 设置析构标志，防止其他线程访问（每个实例独立的标志）
     if (destroying.exchange(true)) {
         LOG_ERROR("AudioProcessor destructor called multiple times - preventing double destruction");
         return;
@@ -325,6 +393,9 @@ AudioProcessor::~AudioProcessor() {
             LOG_INFO("Stopping processing during destruction");
             stopProcessing();
         }
+        
+        // 停止矫正线程
+        stopCorrectionThread();
 
         // 断开所有信号连接，防止析构过程中的回调
         if (gui) {
@@ -426,10 +497,38 @@ AudioProcessor::~AudioProcessor() {
             }
         }
         
-        // 然后清理识别器
+        // 然后清理识别器（添加CUDA同步以避免内存池错误）
         if (fast_recognizer) {
             try {
+                LOG_INFO("正在清理Fast recognizer...");
+                
+                // 如果使用GPU，在清理前强制同步CUDA设备
+                if (use_gpu) {
+                    LOG_INFO("GPU模式：在清理识别器前同步CUDA设备");
+                    try {
+#ifdef GGML_USE_CUDA
+                        cudaDeviceSynchronize();
+                        LOG_INFO("CUDA设备同步完成");
+#endif
+                    } catch (...) {
+                        LOG_WARNING("CUDA设备同步失败，继续清理过程");
+                    }
+                }
+                
                 fast_recognizer.reset();
+                
+                // 清理后再次同步，确保CUDA内存池状态一致
+                if (use_gpu) {
+                    try {
+#ifdef GGML_USE_CUDA
+                        cudaDeviceSynchronize();
+                        LOG_INFO("识别器清理后CUDA设备同步完成");
+#endif
+                    } catch (...) {
+                        LOG_WARNING("清理后CUDA设备同步失败");
+                    }
+                }
+                
                 LOG_INFO("Fast recognizer cleaned up");
             } catch (const std::exception& e) {
                 LOG_ERROR("Error cleaning fast recognizer: " + std::string(e.what()));
@@ -438,7 +537,35 @@ AudioProcessor::~AudioProcessor() {
         
         if (preloaded_fast_recognizer) {
             try {
+                LOG_INFO("正在清理Preloaded fast recognizer...");
+                
+                // 如果使用GPU，在清理前强制同步CUDA设备
+                if (use_gpu) {
+                    LOG_INFO("GPU模式：在清理预加载识别器前同步CUDA设备");
+                    try {
+#ifdef GGML_USE_CUDA
+                        cudaDeviceSynchronize();
+                        LOG_INFO("CUDA设备同步完成");
+#endif
+                    } catch (...) {
+                        LOG_WARNING("CUDA设备同步失败，继续清理过程");
+                    }
+                }
+                
                 preloaded_fast_recognizer.reset();
+                
+                // 清理后再次同步
+                if (use_gpu) {
+                    try {
+#ifdef GGML_USE_CUDA
+                        cudaDeviceSynchronize();
+                        LOG_INFO("预加载识别器清理后CUDA设备同步完成");
+#endif
+                    } catch (...) {
+                        LOG_WARNING("清理后CUDA设备同步失败");
+                    }
+                }
+                
                 LOG_INFO("Preloaded fast recognizer cleaned up");
             } catch (const std::exception& e) {
                 LOG_ERROR("Error cleaning preloaded fast recognizer: " + std::string(e.what()));
@@ -523,8 +650,23 @@ AudioProcessor::~AudioProcessor() {
             }
             
             // 不删除video_widget，它可能是GUI拥有的
-                video_widget = nullptr;
-                LOG_INFO("视频组件连接已断开");
+            // 只有当video_widget是我们自己创建的时候才删除，否则只断开连接
+            if (video_widget) {
+                // 检查这个video_widget是否是GUI拥有的
+                QVideoWidget* guiVideoWidget = nullptr;
+                if (gui && QMetaObject::invokeMethod(gui, "getVideoWidget", 
+                    Qt::DirectConnection, 
+                    Q_RETURN_ARG(QVideoWidget*, guiVideoWidget)) && 
+                    guiVideoWidget && video_widget == guiVideoWidget) {
+                    // 这是GUI拥有的，只断开连接，不删除，也不设为nullptr
+                    LOG_INFO("视频组件是GUI拥有的，只断开连接，保持引用");
+                } else {
+                    // 这是我们自己创建的，可以安全删除
+                    delete video_widget;
+                    video_widget = nullptr;
+                    LOG_INFO("自创建的视频组件已删除");
+                }
+            }
             
             // 清理音频输出
             if (audio_output) {
@@ -541,17 +683,20 @@ AudioProcessor::~AudioProcessor() {
         LOG_ERROR("析构函数清理过程中出现异常: " + std::string(e.what()));
         
         // 即使出现异常，也要重置destroying标志
-        destroying = false;
+        destroying.store(false);
     } catch (...) {
         LOG_ERROR("析构函数清理过程中出现未知异常");
-        destroying = false;
+        destroying.store(false);
     }
     
     // 重置destroying标志
-    destroying = false;
+    destroying.store(false);
     
     LOG_INFO("AudioProcessor析构函数执行完成");
 }
+
+
+
 
 void AudioProcessor::setInputFile(const std::string& file_path) {
     // 如果有正在处理的任务，先停止
@@ -667,91 +812,105 @@ void AudioProcessor::setInputFile(const std::string& file_path) {
                 Qt::DirectConnection, 
                 Q_RETURN_ARG(QVideoWidget*, guiVideoWidget));
                 
-                if (guiVideoWidget && media_player) {
-                    // 再次验证媒体播放器在设置视频接收器前仍然有效
-                    try {
-                        QMediaPlayer::MediaStatus status = media_player->mediaStatus();
-                        (void)status; // 避免未使用变量警告
-                        
-                        // 临时跳过视频接收器设置以避免堆分配问题
-                        // TODO: 后续可能需要在更安全的时机设置视频接收器
-                        LOG_INFO("跳过视频接收器设置，避免堆分配问题");
-                        LOG_INFO("成功设置视频接收器");
-                    } catch (const std::exception& e) {
-                        LOG_ERROR("设置视频接收器时媒体播放器验证失败: " + std::string(e.what()));
-                        throw std::runtime_error("Media player validation failed during video sink setup: " + std::string(e.what()));
-                    } catch (...) {
-                        LOG_ERROR("设置视频接收器时发生未知异常");
-                        throw std::runtime_error("Unknown exception during video sink setup");
-                    }
-                
-                // 清理我们自己的视频组件（如果有）
-                if (video_widget && video_widget != guiVideoWidget) {
-                    delete video_widget;
-                }
-                
-                // 使用GUI的视频组件
+            // 确保我们有有效的视频组件引用（可能在stopProcessing后丢失）
+            if (guiVideoWidget) {
                 video_widget = guiVideoWidget;
+                LOG_INFO("重新获取GUI视频组件引用");
+            }
                 
-                LOG_INFO("Using GUI's video widget for video playback");
-            } else {
-                LOG_WARNING("Failed to get GUI's video widget, falling back to new video widget");
-                
-                // 不再创建新窗口，而是尝试通知GUI创建并设置自己的视频组件
-                if (gui) {
-                    // 通知GUI需要显示视频
-                    QMetaObject::invokeMethod(gui, "prepareVideoWidget", 
-                        Qt::QueuedConnection);
+                if (guiVideoWidget && media_player) {
+                    // 使用更安全的方式设置视频组件，避免lambda中的this指针问题
+                    // 创建弱引用来避免悬空指针
+                    QPointer<QVideoWidget> safeGuiWidget(guiVideoWidget);
+                    QPointer<QMediaPlayer> safeMediaPlayer(media_player);
+                    QPointer<QObject> safeGui(gui);
                     
-                    // 稍微延迟后再次尝试获取视频组件
-                    QTimer::singleShot(100, this, [this]() {
-                        QVideoWidget* guiVideoWidget = nullptr;
-                        if (gui && QMetaObject::invokeMethod(gui, "getVideoWidget", 
-                            Qt::DirectConnection, 
-                            Q_RETURN_ARG(QVideoWidget*, guiVideoWidget)) && guiVideoWidget) {
-                            
-                                // 确保media_player仍然可用
-                                if (media_player) {
-                                    // 验证媒体播放器在延迟设置时仍然有效
-                                    try {
-                                        QMediaPlayer::MediaStatus status = media_player->mediaStatus();
-                                        (void)status; // 避免未使用变量警告
-                                        
-                                        // 使用嵌套延迟设置，避免堆分配冲突
-                                        QTimer::singleShot(50, this, [this, guiVideoWidget]() {
-                                            if (!media_player || !guiVideoWidget) return;
-                                            try {
-                                                QVideoSink* videoSink = guiVideoWidget->videoSink();
-                                                if (videoSink) {
-                                                    media_player->setVideoSink(videoSink);
-                                                    LOG_INFO("嵌套延迟设置视频接收器成功");
-                                                }
-                                            } catch (...) {
-                                                LOG_WARNING("嵌套延迟设置视频接收器失败");
-                                            }
-                                        });
-                                        LOG_INFO("延迟设置视频接收器成功");
-                                    } catch (const std::exception& e) {
-                                        LOG_ERROR("延迟设置视频接收器时媒体播放器验证失败: " + std::string(e.what()));
-                                    } catch (...) {
-                                        LOG_ERROR("延迟设置视频接收器时发生未知异常");
+                    // 直接在主线程中执行，避免异步执行时的对象失效问题
+                    if (QThread::currentThread() == qApp->thread()) {
+                        // 已经在主线程中，直接执行
+                        std::cout << "DEBUG: 在主线程中直接设置视频组件" << std::endl;
+                        LOG_INFO("主线程直接执行视频组件设置");
+                        
+                        if (safeMediaPlayer && safeGuiWidget && !destroying.load()) {
+                            try {
+                                // 验证对象有效性
+                                QVideoSink* videoSink = safeGuiWidget->videoSink();
+                                std::cout << "DEBUG: videoSink地址: " << videoSink << std::endl;
+                                
+                                if (videoSink) {
+                                    safeMediaPlayer->setVideoSink(videoSink);
+                                    safeGuiWidget->setVisible(true);
+                                    
+                                    LOG_INFO("视频组件已在主线程中安全设置");
+                                    if (safeGui) {
+                                        QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                            Qt::QueuedConnection, 
+                                            Q_ARG(QString, "视频组件设置成功，视频播放已启用"));
                                     }
-                            
-                            // 清理现有的视频组件（如果有）
-                            if (video_widget && video_widget != guiVideoWidget) {
-                                delete video_widget;
-                            }
-                            
-                            // 使用GUI的视频组件
-                            video_widget = guiVideoWidget;
-                            LOG_INFO("Successfully got GUI's video widget after delay");
                                 } else {
-                                    LOG_WARNING("Media player became null during delayed video widget setup");
+                                    LOG_ERROR("视频接收器为空，无法设置视频输出");
+                                    if (safeGui) {
+                                        QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                            Qt::QueuedConnection, 
+                                            Q_ARG(QString, "错误: 视频接收器无效，已降级为音频模式播放"));
+                                    }
                                 }
-                        } else {
-                            LOG_WARNING("Still failed to get GUI's video widget after delay");
+                            } catch (const std::exception& e) {
+                                LOG_ERROR("设置视频接收器时发生异常: " + std::string(e.what()));
+                                if (safeGui) {
+                                    QString errorMsg = QString("错误: 视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                                    QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                        Qt::QueuedConnection, 
+                                        Q_ARG(QString, errorMsg));
+                                }
+                            }
                         }
-                    });
+                    } else {
+                        // 在其他线程中，使用QMetaObject::invokeMethod安全调用
+                        std::cout << "DEBUG: 使用QMetaObject::invokeMethod设置视频组件" << std::endl;
+                        QMetaObject::invokeMethod(qApp, [safeMediaPlayer, safeGuiWidget, safeGui]() {
+                            LOG_INFO("QMetaObject::invokeMethod执行视频组件设置");
+                            
+                            if (safeMediaPlayer && safeGuiWidget) {
+                                try {
+                                    QVideoSink* videoSink = safeGuiWidget->videoSink();
+                                    if (videoSink) {
+                                        safeMediaPlayer->setVideoSink(videoSink);
+                                        safeGuiWidget->setVisible(true);
+                                        LOG_INFO("视频组件已通过QMetaObject::invokeMethod安全设置");
+                                        
+                                        if (safeGui) {
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, "视频组件设置成功，视频播放已启用"));
+                                        }
+                                    } else {
+                                        LOG_ERROR("视频接收器为空，无法设置视频输出");
+                                        if (safeGui) {
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, "错误: 视频接收器无效，已降级为音频模式播放"));
+                                        }
+                                    }
+                                } catch (const std::exception& e) {
+                                    LOG_ERROR("设置视频接收器时发生异常: " + std::string(e.what()));
+                                    if (safeGui) {
+                                        QString errorMsg = QString("错误: 视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                                        QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                            Qt::QueuedConnection, 
+                                            Q_ARG(QString, errorMsg));
+                                    }
+                                }
+                            }
+                        }, Qt::QueuedConnection);
+                    }
+                    
+                    if (gui) {
+                        // 不再调用showVideoWidget方法创建新窗口
+                        // 而是仅通知GUI视频将开始播放
+                        QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                            Qt::QueuedConnection, 
+                            Q_ARG(QString, "视频播放准备就绪"));
                 }
             }
         }
@@ -878,44 +1037,61 @@ void AudioProcessor::setStreamUrl(const std::string& url) {
             Q_RETURN_ARG(QVideoWidget*, guiVideoWidget));
             
         if (guiVideoWidget && media_player) {
-            // 验证媒体播放器在设置流视频接收器前仍然有效
-            try {
-                QMediaPlayer::MediaStatus status = media_player->mediaStatus();
-                (void)status; // 避免未使用变量警告
-                
-                // 使用延迟设置流视频接收器，避免堆分配冲突
-                QTimer::singleShot(50, this, [this, guiVideoWidget]() {
-                    if (!media_player || !guiVideoWidget) return;
+            // 使用串行分配器设置视频组件
+            MemorySerializer::getInstance().executeSerial([this, guiVideoWidget]() {
+                if (media_player && guiVideoWidget) {
                     try {
+                        // 检查videoSink是否有效
                         QVideoSink* videoSink = guiVideoWidget->videoSink();
                         if (videoSink) {
                             media_player->setVideoSink(videoSink);
-                            LOG_INFO("延迟设置流视频接收器成功");
+                            
+                            // 直接将视频组件设为可见，不创建新窗口
+                            guiVideoWidget->setVisible(true);
+                            
+                            LOG_INFO("视频组件已通过串行分配器安全设置");
+                            if (gui) {
+                                QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                                    Qt::QueuedConnection, 
+                                    Q_ARG(QString, "视频组件设置成功，视频播放已启用"));
+                            }
                         } else {
-                            LOG_WARNING("流视频组件的videoSink为空");
+                            LOG_ERROR("视频接收器为空，无法设置视频输出");
+                            std::cerr << "ERROR: VideoSink is null for video widget" << std::endl;
+                            if (gui) {
+                                QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                                    Qt::QueuedConnection, 
+                                    Q_ARG(QString, "错误: 视频接收器无效，已降级为音频模式播放"));
+                            }
                         }
-                    } catch (...) {
-                        LOG_WARNING("延迟设置流视频接收器失败");
-                    }
-                });
-                LOG_INFO("成功设置流视频接收器");
             } catch (const std::exception& e) {
-                LOG_ERROR("设置流视频接收器时媒体播放器验证失败: " + std::string(e.what()));
-                throw std::runtime_error("Media player validation failed during stream video sink setup: " + std::string(e.what()));
+                        LOG_ERROR("设置视频接收器时发生异常: " + std::string(e.what()));
+                        std::cerr << "ERROR: Exception in setVideoSink: " << e.what() << std::endl;
+                        if (gui) {
+                            QString errorMsg = QString("错误: 视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                            QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                                Qt::QueuedConnection, 
+                                Q_ARG(QString, errorMsg));
+                        }
             } catch (...) {
-                LOG_ERROR("设置流视频接收器时发生未知异常");
-                throw std::runtime_error("Unknown exception during stream video sink setup");
+                        LOG_ERROR("设置视频接收器时发生未知异常");
+                        std::cerr << "ERROR: Unknown exception in setVideoSink" << std::endl;
+                        if (gui) {
+                            QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                                Qt::QueuedConnection, 
+                                Q_ARG(QString, "错误: 视频设置失败(未知错误)，已降级为音频模式播放"));
+                        }
+                    }
+                }
+            });
+            
+            if (gui) {
+                // 不再调用showVideoWidget方法创建新窗口
+                // 而是仅通知GUI视频将开始播放
+                QMetaObject::invokeMethod(gui, "appendLogMessage", 
+                    Qt::QueuedConnection, 
+                    Q_ARG(QString, "视频播放准备就绪"));
             }
-            
-            // 清理我们自己的视频组件（如果有）
-            if (video_widget && video_widget != guiVideoWidget) {
-                delete video_widget;
-            }
-            
-            // 使用GUI的视频组件
-            video_widget = guiVideoWidget;
-            
-            LOG_INFO("Using GUI's video widget for stream playback");
         } else {
             LOG_WARNING("Failed to get GUI's video widget for stream");
             
@@ -1493,14 +1669,94 @@ void AudioProcessor::startProcessing() {
                 
                 if (gui) {
                     logMessage(gui, "Video processing started with extracted audio: " + temp_wav_path);
-                }
+                } 
                 
-                    // 串行设置视频组件
-                if (video_widget && media_player) {
-                    media_player->setVideoSink(video_widget->videoSink());
-                    
-                    // 直接将视频组件设为可见，不创建新窗口
-                    video_widget->setVisible(true);
+                                        // 使用串行分配器设置视频组件
+                    if (video_widget && media_player) {
+                        LOG_INFO("准备通过串行分配器设置视频流播放组件");
+                        std::cout << "DEBUG: About to execute serial lambda for video stream setup" << std::endl;
+                        
+                        // 使用更安全的方式，避免lambda中的this指针问题
+                        QPointer<QVideoWidget> safeVideoWidget(video_widget);
+                        QPointer<QMediaPlayer> safeMediaPlayer(media_player);
+                        QPointer<QObject> safeGui(gui);
+                        
+                        // 直接在主线程中执行，避免异步执行时的对象失效问题
+                        if (QThread::currentThread() == qApp->thread()) {
+                            // 已经在主线程中，直接执行
+                            std::cout << "DEBUG: 在主线程中直接设置视频组件" << std::endl;
+                            LOG_INFO("主线程直接执行视频组件设置");
+                            
+                            if (safeMediaPlayer && safeVideoWidget) {
+                                try {
+                                    QVideoSink* videoSink = safeVideoWidget->videoSink();
+                                    if (videoSink) {
+                                        safeMediaPlayer->setVideoSink(videoSink);
+                                        safeVideoWidget->setVisible(true);
+                                        
+                                        LOG_INFO("视频组件已在主线程中安全设置");
+                                        if (safeGui) {
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, "视频组件设置成功，视频播放已启用"));
+                                        }
+                                    } else {
+                                        LOG_ERROR("视频接收器为空，无法设置视频输出");
+                                        if (safeGui) {
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, "错误: 视频接收器无效，已降级为音频模式播放"));
+                                        }
+                                    }
+                                } catch (const std::exception& e) {
+                                    LOG_ERROR("设置视频接收器时发生异常: " + std::string(e.what()));
+                                    if (safeGui) {
+                                        QString errorMsg = QString("错误: 视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                                        QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                            Qt::QueuedConnection, 
+                                            Q_ARG(QString, errorMsg));
+                                    }
+                                }
+                            }
+                        } else {
+                            // 在其他线程中，使用QMetaObject::invokeMethod安全调用
+                            std::cout << "DEBUG: 使用QMetaObject::invokeMethod设置视频组件" << std::endl;
+                            QMetaObject::invokeMethod(qApp, [safeMediaPlayer, safeVideoWidget, safeGui]() {
+                                LOG_INFO("QMetaObject::invokeMethod执行视频组件设置");
+                                
+                                if (safeMediaPlayer && safeVideoWidget) {
+                                    try {
+                                        QVideoSink* videoSink = safeVideoWidget->videoSink();
+                                        if (videoSink) {
+                                            safeMediaPlayer->setVideoSink(videoSink);
+                                            safeVideoWidget->setVisible(true);
+                                            LOG_INFO("视频组件已通过QMetaObject::invokeMethod安全设置");
+                                            
+                                            if (safeGui) {
+                                                QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                    Qt::QueuedConnection, 
+                                                    Q_ARG(QString, "视频组件设置成功，视频播放已启用"));
+                                            }
+                                        } else {
+                                            LOG_ERROR("视频接收器为空，无法设置视频输出");
+                                            if (safeGui) {
+                                                QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                    Qt::QueuedConnection, 
+                                                    Q_ARG(QString, "错误: 视频接收器无效，已降级为音频模式播放"));
+                                            }
+                                        }
+                                    } catch (const std::exception& e) {
+                                        LOG_ERROR("设置视频接收器时发生异常: " + std::string(e.what()));
+                                        if (safeGui) {
+                                            QString errorMsg = QString("错误: 视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, errorMsg));
+                                        }
+                                    }
+                                }
+                            }, Qt::QueuedConnection);
+                        }
                     
                     if (gui) {
                         // 不再调用showVideoWidget方法创建新窗口
@@ -1583,15 +1839,100 @@ void AudioProcessor::startProcessing() {
                         logMessage(gui, "Video stream processing started: " + current_stream_url);
                     }
                     
-                    // 串行设置视频组件
+                    // 使用串行分配器设置视频组件
                     if (video_widget && media_player) {
-                        media_player->setVideoSink(video_widget->videoSink());
-                        video_widget->setVisible(true);
+                        LOG_INFO("准备通过串行分配器设置视频流播放组件");
+                        std::cout << "DEBUG: About to execute serial lambda for video stream setup" << std::endl;
+                        
+                        // 使用更安全的方式，避免lambda中的this指针问题
+                        QPointer<QVideoWidget> safeVideoWidget(video_widget);
+                        QPointer<QMediaPlayer> safeMediaPlayer(media_player);
+                        QPointer<QObject> safeGui(gui);
+                        
+                        // 直接在主线程中执行，避免异步执行时的对象失效问题
+                        if (QThread::currentThread() == qApp->thread()) {
+                            // 已经在主线程中，直接执行
+                            std::cout << "DEBUG: 在主线程中直接设置视频流组件" << std::endl;
+                            LOG_INFO("主线程直接执行视频流组件设置");
+                            
+                            if (safeMediaPlayer && safeVideoWidget) {
+                                try {
+                                    QVideoSink* videoSink = safeVideoWidget->videoSink();
+                                    if (videoSink) {
+                                        safeMediaPlayer->setVideoSink(videoSink);
+                                        safeVideoWidget->setVisible(true);
+                                        
+                                        LOG_INFO("视频流组件已在主线程中安全设置");
+                                        if (safeGui) {
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, "视频组件设置成功，视频播放已启用"));
+                                        }
+                                    } else {
+                                        LOG_ERROR("视频接收器为空，无法设置视频输出");
+                                        if (safeGui) {
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, "错误: 视频接收器无效，已降级为音频模式播放"));
+                                        }
+                                    }
+                                } catch (const std::exception& e) {
+                                    LOG_ERROR("设置视频接收器时发生异常: " + std::string(e.what()));
+                                    if (safeGui) {
+                                        QString errorMsg = QString("错误: 视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                                        QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                            Qt::QueuedConnection, 
+                                            Q_ARG(QString, errorMsg));
+                                    }
+                                }
+                            }
+                        } else {
+                            // 在其他线程中，使用QMetaObject::invokeMethod安全调用
+                            std::cout << "DEBUG: 使用QMetaObject::invokeMethod设置视频流组件" << std::endl;
+                            QMetaObject::invokeMethod(qApp, [safeMediaPlayer, safeVideoWidget, safeGui]() {
+                                LOG_INFO("QMetaObject::invokeMethod执行视频流组件设置");
+                                
+                                if (safeMediaPlayer && safeVideoWidget) {
+                                    try {
+                                        QVideoSink* videoSink = safeVideoWidget->videoSink();
+                                        if (videoSink) {
+                                            safeMediaPlayer->setVideoSink(videoSink);
+                                            safeVideoWidget->setVisible(true);
+                                            LOG_INFO("视频流组件已通过QMetaObject::invokeMethod安全设置");
+                                            
+                                            if (safeGui) {
+                                                QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                    Qt::QueuedConnection, 
+                                                    Q_ARG(QString, "视频组件设置成功，视频播放已启用"));
+                                            }
+                                        } else {
+                                            LOG_ERROR("视频接收器为空，无法设置视频输出");
+                                            if (safeGui) {
+                                                QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                    Qt::QueuedConnection, 
+                                                    Q_ARG(QString, "错误: 视频接收器无效，已降级为音频模式播放"));
+                                            }
+                                        }
+                                    } catch (const std::exception& e) {
+                                        LOG_ERROR("设置视频接收器时发生异常: " + std::string(e.what()));
+                                        if (safeGui) {
+                                            QString errorMsg = QString("错误: 视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                                            QMetaObject::invokeMethod(safeGui, "appendLogMessage", 
+                                                Qt::QueuedConnection, 
+                                                Q_ARG(QString, errorMsg));
+                                        }
+                                    }
+                                }
+                            }, Qt::QueuedConnection);
+                        }
+                        
+                        std::cout << "DEBUG: Video stream serial lambda queued for execution" << std::endl;
+                        LOG_INFO("视频流播放设置已提交到串行分配器队列");
                         
                         if (gui) {
                             QMetaObject::invokeMethod(gui, "appendLogMessage", 
                                 Qt::QueuedConnection, 
-                                Q_ARG(QString, "Video stream playback ready"));
+                                Q_ARG(QString, "视频播放准备就绪"));
                         }
                     }
                 }
@@ -1660,12 +2001,18 @@ void AudioProcessor::startProcessing() {
                                 }
                             }
                             
-                fast_recognizer = std::make_unique<FastRecognizer>(
-                                model_path_to_use,
-                    nullptr,
-                    current_language,
-                    use_gpu,
-                                vad_threshold_value);
+                // 序列化创建FastRecognizer以避免并行分配问题
+                {
+                    static std::mutex recognizer_creation_mutex;
+                    std::lock_guard<std::mutex> creation_lock(recognizer_creation_mutex);
+                    
+                    fast_recognizer = createFastRecognizerSafely(
+                                    model_path_to_use,
+                        fast_results.get(),
+                        current_language,
+                        use_gpu,
+                                    vad_threshold_value);
+                }
                 
                 if (gui) {
                     logMessage(gui, "Created fast recognizer based on preloaded model");
@@ -1677,6 +2024,9 @@ void AudioProcessor::startProcessing() {
                                 if (preloaded_fast_recognizer) {
                                     preloaded_fast_recognizer.reset();
                                     LOG_INFO("Released preloaded model after creating working instance");
+                                    
+                                    // 强制内存回收，避免内存碎片
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
                                 }
                             }
             } else {
@@ -1712,8 +2062,14 @@ void AudioProcessor::startProcessing() {
                                 }
                             }
                             
-                fast_recognizer = std::make_unique<FastRecognizer>(
-                                model_path, nullptr, current_language, use_gpu, vad_threshold_value);
+                // 序列化创建FastRecognizer以避免并行分配问题
+                {
+                    static std::mutex recognizer_creation_mutex;
+                    std::lock_guard<std::mutex> creation_lock(recognizer_creation_mutex);
+                    
+                    fast_recognizer = createFastRecognizerSafely(
+                                    model_path, fast_results.get(), current_language, use_gpu, vad_threshold_value);
+                }
             }
         }
         
@@ -1810,8 +2166,8 @@ void AudioProcessor::startProcessing() {
 
 bool AudioProcessor::preloadModels(std::function<void(const std::string&)> progress_callback) {
     // 使用静态mutex确保同时只有一个模型加载过程
-    static std::mutex model_loading_mutex;
-    std::lock_guard<std::mutex> global_lock(model_loading_mutex);
+    static std::mutex static_model_loading_mutex;
+    std::lock_guard<std::mutex> global_lock(static_model_loading_mutex);
     
     try {
         auto& config = ConfigManager::getInstance();
@@ -1858,7 +2214,7 @@ bool AudioProcessor::preloadModels(std::function<void(const std::string&)> progr
         
         try {
             // 第一步：尝试使用当前设置加载
-            temp_recognizer = std::make_unique<FastRecognizer>(
+            temp_recognizer = createFastRecognizerSafely(
                 fast_model_path, 
                 nullptr, 
                 "zh", 
@@ -1881,7 +2237,7 @@ bool AudioProcessor::preloadModels(std::function<void(const std::string&)> progr
             // 如果GPU模式失败，尝试CPU模式
             if (use_gpu) {
                 try {
-                    temp_recognizer = std::make_unique<FastRecognizer>(
+                    temp_recognizer = createFastRecognizerSafely(
                         fast_model_path, 
                         nullptr, 
                         "zh", 
@@ -1955,9 +2311,73 @@ QVideoWidget* AudioProcessor::getVideoWidget() {
             video_widget = guiVideoWidget;
             LOG_INFO("Using GUI's video widget");
             
-            // 如果已经有 media_player，设置视频输出
+            // 如果已经有 media_player，使用串行分配器设置视频输出
             if (media_player) {
-                media_player->setVideoSink(video_widget->videoSink());
+                LOG_INFO("准备通过串行分配器设置GUI视频组件");
+                std::cout << "DEBUG: About to execute serial lambda for GUI video widget setup" << std::endl;
+                
+                MemorySerializer::getInstance().executeSerial([this]() {
+                    LOG_INFO("串行分配器Lambda开始执行 - GUI视频组件设置");
+                    std::cout << "DEBUG: Inside serial lambda - GUI video widget setup started" << std::endl;
+                    
+                    try {
+                        if (media_player && video_widget) {
+                            std::cout << "DEBUG: Both media_player and video_widget are valid" << std::endl;
+                            LOG_INFO("媒体播放器和视频组件都有效，开始连接");
+                            
+                            // 在设置videoSink前先释放现有的资源
+                            std::cout << "DEBUG: Clearing existing video sink" << std::endl;
+                            media_player->setVideoSink(nullptr);
+                            
+                            // 然后设置新的视频接收器，但首先检查其有效性
+                            std::cout << "DEBUG: Getting video sink from widget" << std::endl;
+                            QVideoSink* videoSink = video_widget->videoSink();
+                            
+                            if (videoSink) {
+                                std::cout << "DEBUG: VideoSink is valid, setting to media player" << std::endl;
+                                media_player->setVideoSink(videoSink);
+                                
+                                LOG_INFO("GUI视频组件已通过串行分配器安全连接到媒体播放器");
+                                std::cout << "DEBUG: GUI video widget successfully connected" << std::endl;
+                                
+                                if (gui) {
+                                    logMessage(gui, "Video widget created and connected to media player");
+                                }
+                            } else {
+                                LOG_ERROR("GUI视频组件的videoSink为空，无法设置视频输出");
+                                std::cerr << "ERROR: GUI VideoWidget's VideoSink is null" << std::endl;
+                                std::cout << "DEBUG: VideoSink is null - cannot set video output" << std::endl;
+                                if (gui) {
+                                    logMessage(gui, "错误: GUI视频接收器无效，已降级为音频模式播放", true);
+                                }
+                            }
+                        } else {
+                            std::cout << "DEBUG: media_player or video_widget is null" << std::endl;
+                            LOG_WARNING("媒体播放器或视频组件为空，跳过视频设置");
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_ERROR("设置GUI视频接收器时发生异常: " + std::string(e.what()));
+                        std::cerr << "ERROR: Exception in GUI VideoWidget setVideoSink: " << e.what() << std::endl;
+                        std::cout << "DEBUG: Exception caught in serial lambda: " << e.what() << std::endl;
+                        if (gui) {
+                            QString errorMsg = QString("错误: GUI视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                            logMessage(gui, errorMsg.toStdString(), true);
+                        }
+                    } catch (...) {
+                        LOG_ERROR("设置GUI视频组件时发生未知异常");
+                        std::cerr << "ERROR: Unknown exception in GUI VideoWidget setVideoSink" << std::endl;
+                        std::cout << "DEBUG: Unknown exception caught in serial lambda" << std::endl;
+                        if (gui) {
+                            logMessage(gui, "错误: GUI视频设置失败(未知错误)，已降级为音频模式播放", true);
+                        }
+                    }
+                    
+                    LOG_INFO("串行分配器Lambda执行完成 - GUI视频组件设置");
+                    std::cout << "DEBUG: Serial lambda execution completed - GUI video widget setup" << std::endl;
+                });
+                
+                std::cout << "DEBUG: Serial lambda queued for execution" << std::endl;
+                LOG_INFO("GUI视频组件设置已提交到串行分配器队列");
             }
             
             return video_widget;
@@ -1976,32 +2396,65 @@ QVideoWidget* AudioProcessor::getVideoWidget() {
             video_widget->setAttribute(Qt::WA_OpaquePaintEvent);
             video_widget->setAttribute(Qt::WA_NoSystemBackground);
             
-            // 如果已经有 media_player，设置视频输出
+            // 如果已经有 media_player，使用串行分配器设置视频输出
             if (media_player) {
+                MemorySerializer::getInstance().executeSerial([this]() {
                 try {
-                    std::cout << "Connecting video widget to media player" << std::endl;
+                        if (media_player && video_widget) {
+                            std::cout << "Connecting video widget to media player via serializer" << std::endl;
                     
                     // 在设置videoSink前先释放现有的资源
                     media_player->setVideoSink(nullptr);
                     
-                    // 然后设置新的视频接收器
-                    media_player->setVideoSink(video_widget->videoSink());
+                            // 然后设置新的视频接收器，但首先检查其有效性
+                            QVideoSink* videoSink = video_widget->videoSink();
+                            if (videoSink) {
+                                media_player->setVideoSink(videoSink);
+                            } else {
+                                LOG_ERROR("新创建的视频组件的videoSink为空，无法设置视频输出");
+                                std::cerr << "ERROR: New VideoWidget's VideoSink is null" << std::endl;
+                                if (gui) {
+                                    logMessage(gui, "错误: 新建视频接收器无效，已降级为音频模式播放", true);
+                                }
+                                return; // 早退，不再处理视频
+                            }
+                            
+                            LOG_INFO("新创建的视频组件已通过串行分配器安全连接到媒体播放器");
                     
                     if (gui) {
                         logMessage(gui, "Video widget created and connected to media player");
+                            }
                     }
                 } catch (const std::exception& e) {
+                        LOG_ERROR("设置新建视频接收器时发生异常: " + std::string(e.what()));
+                        std::cerr << "ERROR: Exception in new VideoWidget setVideoSink: " << e.what() << std::endl;
                     if (gui) {
-                        logMessage(gui, "Failed to set video sink: " + std::string(e.what()), true);
+                            QString errorMsg = QString("错误: 新建视频设置失败 - %1，已降级为音频模式播放").arg(e.what());
+                            logMessage(gui, errorMsg.toStdString(), true);
+                        }
+                    } catch (...) {
+                        LOG_ERROR("设置新建视频组件时发生未知异常");
+                        std::cerr << "ERROR: Unknown exception in new VideoWidget setVideoSink" << std::endl;
+                        if (gui) {
+                            logMessage(gui, "错误: 新建视频设置失败(未知错误)，已降级为音频模式播放", true);
+                        }
                     }
-                    std::cerr << "Failed to connect video sink: " << e.what() << std::endl;
-                }
+                });
             }
         } catch (const std::exception& e) {
             // 如果创建视频组件失败，记录错误并返回nullptr
-            std::cerr << "Failed to create video widget: " << e.what() << std::endl;
+            LOG_ERROR("创建视频组件失败: " + std::string(e.what()));
+            std::cerr << "ERROR: Failed to create video widget: " << e.what() << std::endl;
             if (gui) {
-                logMessage(gui, "Error: Failed to create video widget: " + std::string(e.what()), true);
+                QString errorMsg = QString("错误: 视频组件创建失败 - %1，已降级为音频模式播放").arg(e.what());
+                logMessage(gui, errorMsg.toStdString(), true);
+            }
+            return nullptr;
+        } catch (...) {
+            LOG_ERROR("创建视频组件时发生未知异常");
+            std::cerr << "ERROR: Unknown exception while creating video widget" << std::endl;
+            if (gui) {
+                logMessage(gui, "错误: 视频组件创建失败(未知错误)，已降级为音频模式播放", true);
             }
             return nullptr;
         }
@@ -2064,9 +2517,10 @@ void AudioProcessor::startMediaPlayback(const QString& file_path) {
                 
                 // 如果无法创建视频组件，尝试仅播放音频
                 if (!videoWidget) {
-                    std::cerr << "Warning: Could not create video widget, falling back to audio-only playback" << std::endl;
+                    LOG_WARNING("无法创建视频组件，降级为音频播放");
+                    std::cerr << "WARNING: Could not create video widget, falling back to audio-only playback" << std::endl;
                     if (gui) {
-                        logMessage(gui, "Warning: Video output not available, playing audio only", true);
+                        logMessage(gui, "警告: 视频输出不可用，已降级为音频播放", true);
                     }
                     
                     // 确保媒体播放器使用音频输出
@@ -2080,9 +2534,17 @@ void AudioProcessor::startMediaPlayback(const QString& file_path) {
                 }
             } 
             catch (const std::exception& e) {
-                std::cerr << "Error preparing video playback: " << e.what() << std::endl;
+                LOG_ERROR("准备视频播放时发生异常: " + std::string(e.what()));
+                std::cerr << "ERROR: Error preparing video playback: " << e.what() << std::endl;
                 if (gui) {
-                    logMessage(gui, "Warning: Error preparing video, will try audio-only: " + std::string(e.what()), true);
+                    QString errorMsg = QString("警告: 视频准备失败 - %1，已降级为音频播放").arg(e.what());
+                    logMessage(gui, errorMsg.toStdString(), true);
+                }
+            } catch (...) {
+                LOG_ERROR("准备视频播放时发生未知异常");
+                std::cerr << "ERROR: Unknown exception while preparing video playback" << std::endl;
+                if (gui) {
+                    logMessage(gui, "警告: 视频准备失败(未知错误)，已降级为音频播放", true);
                 }
             }
         }
@@ -2262,7 +2724,7 @@ void AudioProcessor::setUseGPU(bool enable) {
                 // 重新创建识别器
                 std::string model_path = preloaded_fast_recognizer->getModelPath();
                 preloaded_fast_recognizer.reset();
-                preloaded_fast_recognizer = std::make_unique<FastRecognizer>(
+                preloaded_fast_recognizer = createFastRecognizerSafely(
                     model_path, 
                     nullptr, 
                     current_language, 
@@ -2274,7 +2736,7 @@ void AudioProcessor::setUseGPU(bool enable) {
                 if (fast_recognizer) {
                     model_path = fast_recognizer->getModelPath();
                     fast_recognizer.reset();
-            fast_recognizer = std::make_unique<FastRecognizer>(
+            fast_recognizer = createFastRecognizerSafely(
                         model_path, 
                         nullptr, 
                 current_language,
@@ -2300,7 +2762,7 @@ void AudioProcessor::setUseGPU(bool enable) {
                     if (preloaded_fast_recognizer) {
                         std::string model_path = preloaded_fast_recognizer->getModelPath();
                         preloaded_fast_recognizer.reset();
-                        preloaded_fast_recognizer = std::make_unique<FastRecognizer>(
+                        preloaded_fast_recognizer = createFastRecognizerSafely(
                             model_path,
                             nullptr,
                 current_language,
@@ -2312,7 +2774,7 @@ void AudioProcessor::setUseGPU(bool enable) {
                     if (fast_recognizer) {
                         std::string model_path = fast_recognizer->getModelPath();
                         fast_recognizer.reset();
-                        fast_recognizer = std::make_unique<FastRecognizer>(
+                        fast_recognizer = createFastRecognizerSafely(
                             model_path,
                             nullptr,
                             current_language,
@@ -2808,8 +3270,6 @@ std::string AudioProcessor::process_audio_batch(const std::vector<float>& audio_
 }
 
 // Fix for "lnt-uninitialized-local: 未初始化本地变量" and "E0070: 不允许使用不完整的类型 'QJsonArray'"
-
-
 
 // Modify the code to initialize variables properly and handle the incomplete type issue
 void AudioProcessor::openAIResultReady(const QString& result) {
@@ -3567,6 +4027,36 @@ void AudioProcessor::initializeParameters() {
     // 初始化活动请求容器
     active_requests.clear();
     
+    // 加载输出矫正配置
+    try {
+        // 从配置文件加载输出矫正设置
+        const nlohmann::json& config_data = config.getConfigData();
+        if (config_data.contains("output_correction")) {
+            const auto& oc_config = config_data["output_correction"];
+            
+            // 设置矫正配置
+            correction_config.server_url = oc_config.value("server_url", "http://localhost:8000");
+            correction_config.model_name = oc_config.value("model_name", "deepseek-coder-7b-instruct-v1.5");
+            correction_config.temperature = oc_config.value("temperature", 0.1f);
+            correction_config.max_tokens = oc_config.value("max_tokens", 512);
+            correction_config.stream_mode = oc_config.value("stream_mode", false);
+            
+            // 设置是否启用输出矫正
+            bool enabled = oc_config.value("enabled", false);
+            setOutputCorrectionEnabled(enabled);
+            
+            LOG_INFO("输出矫正配置已加载：");
+            LOG_INFO("启用状态: " + std::string(enabled ? "启用" : "禁用"));
+            LOG_INFO("服务器URL: " + correction_config.server_url);
+            LOG_INFO("模型名称: " + correction_config.model_name);
+        } else {
+            LOG_INFO("配置文件中未找到输出矫正配置，使用默认设置");
+        }
+    } catch (const std::exception& e) {
+        LOG_WARNING("加载输出矫正配置时出错: " + std::string(e.what()));
+        LOG_INFO("使用默认输出矫正配置");
+    }
+    
     // 记录配置加载情况
     LOG_INFO("配置已从ConfigManager加载：");
     LOG_INFO("语言: " + current_language);
@@ -3576,6 +4066,7 @@ void AudioProcessor::initializeParameters() {
     LOG_INFO("VAD阈值: " + std::to_string(vad_threshold));
     LOG_INFO("精确识别服务器URL: " + precise_server_url);
     LOG_INFO("GPU加速: " + std::string(use_gpu ? "启用" : "禁用"));
+    LOG_INFO("输出矫正: " + std::string(output_correction_enabled ? "启用" : "禁用"));
     LOG_INFO("优化音频预处理: 已启用保守模式");
     LOG_INFO("最小语段长度: " + std::to_string(min_speech_segment_ms) + "ms");
     LOG_INFO("VAD模式: 2 (质量模式，平衡敏感度和准确性)");
@@ -4314,7 +4805,14 @@ void AudioProcessor::handlePreciseServerReply(QNetworkReply* reply) {
 
 // 处理精确识别结果
 void AudioProcessor::preciseResultReceived(int request_id, const QString& result, bool success) {
+    LOG_INFO("=== preciseResultReceived 开始 ===");
+    LOG_INFO("请求ID: " + std::to_string(request_id));
+    LOG_INFO("成功状态: " + std::string(success ? "true" : "false"));
+    LOG_INFO("结果长度: " + std::to_string(result.length()));
+    LOG_INFO("当前线程ID: " + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())));
+    
     if (success) {
+        LOG_INFO("开始处理成功的精确识别结果...");
         // 创建识别结果结构
         RecognitionResult rec_result;
         rec_result.text = result.toStdString();
@@ -4361,21 +4859,41 @@ void AudioProcessor::preciseResultReceived(int request_id, const QString& result
         // 触发信号 - 改为使用安全推送方法，避免重复输出
         // emit preciseServerResultReady(result);
         
-        // 通过safePushToGUI推送，避免重复输出
-        if (safePushToGUI(result, "final", "Precise_Server")) {
-            LOG_INFO("精确识别服务器结果已推送到GUI");
+        LOG_INFO("准备推送精确识别服务器结果到GUI...");
+        
+        // 直接推送到GUI，避免调用可能阻塞的safePushToGUI
+        // 因为精确识别结果不需要矫正，直接更新GUI即可
+        try {
+            LOG_INFO("直接调用GUI更新方法...");
+            bool gui_update_success = QMetaObject::invokeMethod(gui, "appendFinalOutput", 
+                                                                Qt::QueuedConnection, 
+                                                                Q_ARG(QString, result));
+            
+            if (gui_update_success) {
+                LOG_INFO("精确识别服务器结果已直接推送到GUI");
         } else {
-            LOG_INFO("精确识别服务器结果未推送（可能是重复）");
+                LOG_WARNING("GUI更新方法调用失败");
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("直接推送到GUI时发生异常: " + std::string(e.what()));
         }
         
         // 将结果添加到结果队列，供其他组件使用
+        LOG_INFO("添加结果到最终结果队列...");
         if (final_results) {
             final_results->push(rec_result);
+            LOG_INFO("结果已添加到最终结果队列");
+        } else {
+            LOG_WARNING("最终结果队列不可用");
         }
+        
+        LOG_INFO("精确识别结果处理完成");
     } else {
         // 错误处理 - 已在handlePreciseServerReply中处理GUI显示
         LOG_ERROR("精确识别处理结果失败: " + result.toStdString());
     }
+    
+    LOG_INFO("=== preciseResultReceived 结束 ===");
 }
 
 // 添加识别模式设置方法
@@ -4396,6 +4914,9 @@ void AudioProcessor::setRecognitionMode(RecognitionMode mode) {
     
     current_recognition_mode = mode;
     
+    // 根据新的识别模式设置默认矫正配置
+    setDefaultCorrectionForRecognizer(mode);
+    
     // 确保输入模式不被重置
     if (current_input_mode != saved_input_mode) {
         LOG_WARNING("Input mode was unexpectedly changed during recognition mode switch, restoring...");
@@ -4409,10 +4930,10 @@ void AudioProcessor::setRecognitionMode(RecognitionMode mode) {
         QString mode_name;
         switch (mode) {
             case RecognitionMode::FAST_RECOGNITION:
-                mode_name = "快速识别模式";
+                mode_name = "本地识别模式";
                 break;
             case RecognitionMode::PRECISE_RECOGNITION:
-                mode_name = "精确识别模式 (服务器)";
+                mode_name = "服务器识别模式";
                 break;
             case RecognitionMode::OPENAI_RECOGNITION:
                 mode_name = "OpenAI识别模式";
@@ -4599,7 +5120,33 @@ void AudioProcessor::stopProcessing() {
         switch (current_recognition_mode) {
             case RecognitionMode::FAST_RECOGNITION:
                 if (fast_recognizer) {
+                    // 如果使用GPU，在停止前同步CUDA设备
+                    if (use_gpu) {
+                        LOG_INFO("GPU模式：停止识别器前同步CUDA设备");
+                        try {
+#ifdef GGML_USE_CUDA
+                            cudaDeviceSynchronize();
+                            LOG_INFO("停止前CUDA设备同步完成");
+#endif
+                        } catch (...) {
+                            LOG_WARNING("停止前CUDA设备同步失败，继续停止过程");
+                        }
+                    }
+                    
                     fast_recognizer->stop();
+                    
+                    // 停止后再次同步
+                    if (use_gpu) {
+                        try {
+#ifdef GGML_USE_CUDA
+                            cudaDeviceSynchronize();
+                            LOG_INFO("停止后CUDA设备同步完成");
+#endif
+                        } catch (...) {
+                            LOG_WARNING("停止后CUDA设备同步失败");
+                        }
+                    }
+                    
                     LOG_INFO("Fast recognizer stopped");
                 }
                 break;
@@ -5182,13 +5729,13 @@ bool AudioProcessor::safeLoadModel(const std::string& model_path, bool gpu_enabl
         
         try {
             // 第一次尝试：使用请求的设置
-            temp_recognizer = std::make_unique<FastRecognizer>(
-            model_path, 
-            nullptr, 
-                current_language.empty() ? "zh" : current_language, 
-                gpu_enabled, 
+            temp_recognizer = createFastRecognizerSafely(
+                model_path,
+                nullptr,
+                current_language.empty() ? "zh" : current_language,
+                gpu_enabled,
                 vad_threshold
-        );
+            );
             
             if (!temp_recognizer) {
                 throw std::runtime_error("Failed to create FastRecognizer instance");
@@ -5207,7 +5754,7 @@ bool AudioProcessor::safeLoadModel(const std::string& model_path, bool gpu_enabl
                 LOG_INFO("Attempting CPU fallback");
             
             try {
-                    temp_recognizer = std::make_unique<FastRecognizer>(
+                    temp_recognizer = createFastRecognizerSafely(
                     model_path,
                     nullptr,
                         current_language.empty() ? "zh" : current_language,
@@ -5676,7 +6223,7 @@ void AudioProcessor::processAudioDataByMode(const std::vector<float>& audio_data
                     std::string model_path = config.getFastModelPath();
                     float vad_threshold_value = voice_detector ? voice_detector->getThreshold() : vad_threshold;
                     
-                    fast_recognizer = std::make_unique<FastRecognizer>(
+                    fast_recognizer = createFastRecognizerSafely(
                         model_path, nullptr, current_language, use_gpu, vad_threshold_value);
                     fast_recognizer->setInputQueue(fast_results.get());
                     fast_recognizer->setOutputQueue(final_results.get());
@@ -5780,14 +6327,45 @@ bool AudioProcessor::safePushToGUI(const QString& result, const std::string& out
         return false;
     }
     
-    // 生成结果的唯一标识符
-    std::string result_hash = generateResultHash(result, source_type);
+    LOG_INFO("=== safePushToGUI 开始 ===");
+    LOG_INFO("推送类型: " + source_type + " | 输出类型: " + output_type);
+    LOG_INFO("结果文本: " + result.left(100).toStdString() + (result.length() > 100 ? "..." : ""));
+    LOG_INFO("输出矫正启用状态: " + std::string(output_correction_enabled ? "true" : "false"));
+    LOG_INFO("逐行矫正启用状态: " + std::string(line_by_line_correction_enabled ? "true" : "false"));
+    LOG_INFO("当前线程ID: " + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())));
+    
+    // 注意：不在这里进行同步矫正，而是在异步回调中处理
+    QString corrected_result = result;
+    
+    // 检查是否需要异步矫正 - 但要排除精确识别的结果
+    bool is_precise_result = (source_type.find("precise") != std::string::npos);
+    bool needs_async_correction = output_correction_enabled && line_by_line_correction_enabled && !is_precise_result;
+    
+    LOG_INFO("是否为精确识别结果: " + std::string(is_precise_result ? "true" : "false"));
+    LOG_INFO("是否需要异步矫正: " + std::string(needs_async_correction ? "true" : "false"));
+    
+    if (needs_async_correction) {
+        LOG_INFO("将任务加入异步矫正队列: " + source_type);
+        enqueueCorrectionTask(corrected_result, source_type, output_type);
+        return true;  // 返回true，因为任务已加入队列
+            } else {
+        if (is_precise_result) {
+            LOG_INFO("跳过矫正步骤: 精确识别结果不进行矫正");
+        } else {
+            LOG_INFO("跳过矫正步骤: 功能已禁用或不是逐行模式");
+        }
+    }
+    
+    LOG_INFO("矫正处理完成，准备检查重复推送...");
+    
+    // 生成结果的唯一标识符（使用矫正后的结果）
+    std::string result_hash = generateResultHash(corrected_result, source_type);
     
     // 检查是否已经推送过这个结果
     {
         std::lock_guard<std::mutex> lock(push_cache_mutex);
         if (pushed_results_cache.find(result_hash) != pushed_results_cache.end()) {
-            LOG_INFO("结果已推送过，跳过重复推送: " + source_type + " - " + result.left(50).toStdString());
+            LOG_INFO("结果已推送过，跳过重复推送: " + source_type + " - " + corrected_result.left(50).toStdString());
             return false;
         }
         
@@ -5804,25 +6382,28 @@ bool AudioProcessor::safePushToGUI(const QString& result, const std::string& out
         }
     }
     
-    // 根据输出类型选择推送方法
+    LOG_INFO("准备推送到GUI: " + output_type + " - " + corrected_result.left(50).toStdString());
+    
+    // 根据输出类型选择推送方法（使用矫正后的结果）
     bool success = false;
     try {
         if (output_type == "openai") {
             QMetaObject::invokeMethod(gui, "appendOpenAIOutput", 
                 Qt::QueuedConnection, 
-                Q_ARG(QString, result));
-            LOG_INFO("成功推送OpenAI结果到GUI: " + source_type + " - " + result.left(50).toStdString());
+                Q_ARG(QString, corrected_result));
+            LOG_INFO("成功推送OpenAI结果到GUI: " + source_type + " - " + corrected_result.left(50).toStdString());
         } else if (output_type == "final") {
             QMetaObject::invokeMethod(gui, "appendFinalOutput", 
                 Qt::QueuedConnection, 
-                Q_ARG(QString, result));
-            LOG_INFO("成功推送最终结果到GUI: " + source_type + " - " + result.left(50).toStdString());
+                Q_ARG(QString, corrected_result));
+            LOG_INFO("成功推送最终结果到GUI: " + source_type + " - " + corrected_result.left(50).toStdString());
         } else {
             LOG_ERROR("未知的输出类型: " + output_type);
             return false;
         }
         
         success = true;
+        LOG_INFO("GUI推送方法调用成功完成");
         
     } catch (const std::exception& e) {
         LOG_ERROR("推送结果到GUI时发生异常: " + std::string(e.what()));
@@ -5833,6 +6414,7 @@ bool AudioProcessor::safePushToGUI(const QString& result, const std::string& out
         success = false;
     }
     
+    LOG_INFO("=== safePushToGUI 结束，返回结果: " + std::string(success ? "true" : "false") + " ===");
     return success;
 }
 
@@ -6778,4 +7360,691 @@ void AudioProcessor::processPendingAudioData() {
     } catch (const std::exception& e) {
         LOG_ERROR("处理待处理音频数据时出错: " + std::string(e.what()));
     }
+}
+
+// 输出矫正功能实现
+void AudioProcessor::setOutputCorrectionEnabled(bool enable) {
+    output_correction_enabled = enable;
+    
+    if (enable) {
+        // 启动矫正线程
+        startCorrectionThread();
+        
+        LOG_INFO("输出矫正功能已启用，矫正器将在后台线程中初始化 - 服务地址: " + correction_config.server_url);
+    } else {
+        // 停止矫正线程
+        stopCorrectionThread();
+        
+        // 清理矫正器
+        if (output_corrector) {
+            output_corrector.reset();
+            LOG_INFO("矫正器已清理");
+        }
+        
+        // 重置服务检查状态
+        output_correction_service_checked = false;
+        output_correction_service_available = false;
+        
+        LOG_INFO("输出矫正功能已禁用");
+    }
+}
+
+void AudioProcessor::setOutputCorrectionConfig(const OutputCorrector::CorrectionConfig& config) {
+    correction_config = config;
+    
+    if (output_corrector) {
+        output_corrector->setConfig(config);
+    }
+    
+    // 重置服务检查状态，以便下次启用时重新检查
+    output_correction_service_checked = false;
+    output_correction_service_available = false;
+    
+    LOG_INFO("输出矫正配置已更新 - 模型: " + config.model_name + ", 服务器: " + config.server_url);
+}
+
+bool AudioProcessor::testOutputCorrectionService() {
+    try {
+        if (!output_corrector) {
+            output_corrector = std::make_unique<OutputCorrector>(this);
+            output_corrector->setConfig(correction_config);
+        }
+        
+        LOG_INFO("正在检查DeepSeek矫正服务可用性...");
+        
+        bool service_available = output_corrector->isServiceAvailable();
+        output_correction_service_checked = true;
+        output_correction_service_available = service_available;
+        
+        if (service_available) {
+            LOG_INFO("DeepSeek矫正服务检查通过 - 服务正常运行");
+        } else {
+            LOG_WARNING("DeepSeek矫正服务检查失败 - 服务未运行或不可访问");
+            LOG_WARNING("请确保DeepSeek API服务正在运行在: " + correction_config.server_url);
+        }
+        
+        return service_available;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("检查DeepSeek矫正服务时发生异常: " + std::string(e.what()));
+        output_correction_service_checked = true;
+        output_correction_service_available = false;
+        return false;
+    }
+}
+
+std::string AudioProcessor::correctOutputText(const std::string& input_text) {
+    // 如果功能未启用或文本为空，直接返回原文本
+    if (!output_correction_enabled || input_text.empty()) {
+        return input_text;
+    }
+    
+    // 如果输出矫正器未初始化，尝试初始化
+    if (!output_corrector) {
+        output_corrector = std::make_unique<OutputCorrector>(this);
+        output_corrector->setConfig(correction_config);
+    }
+    
+    // 如果服务未检查或不可用，先检查服务状态
+    if (!output_correction_service_checked || !output_correction_service_available) {
+        bool service_available = testOutputCorrectionService();
+        if (!service_available) {
+            LOG_WARNING("DeepSeek矫正服务不可用，跳过文本矫正，返回原文本");
+            return input_text;
+        }
+    }
+    
+    try {
+        LOG_INFO("正在使用DeepSeek模型矫正文本...");
+        
+        std::string corrected_text = output_corrector->correctText(input_text);
+        
+        if (corrected_text.empty()) {
+            LOG_WARNING("DeepSeek矫正返回空结果，使用原文本");
+            return input_text;
+        }
+        
+        // 简单检查，如果矫正后的文本与原文本相差过大，可能有问题
+        if (corrected_text.length() > input_text.length() * 3) {
+            LOG_WARNING("DeepSeek矫正结果异常（长度过大），使用原文本");
+            return input_text;
+        }
+        
+        LOG_INFO("DeepSeek文本矫正完成");
+        LOG_INFO("原文本: " + input_text.substr(0, 50) + (input_text.length() > 50 ? "..." : ""));
+        LOG_INFO("矫正后: " + corrected_text.substr(0, 50) + (corrected_text.length() > 50 ? "..." : ""));
+        
+        return corrected_text;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("DeepSeek文本矫正时发生异常: " + std::string(e.what()));
+        LOG_WARNING("矫正失败，返回原文本");
+        return input_text;
+    }
+}
+
+// 逐行矫正功能实现
+void AudioProcessor::setLineByLineCorrectionEnabled(bool enable) {
+    std::lock_guard<std::mutex> lock(line_correction_mutex);
+    line_by_line_correction_enabled = enable;
+    
+    if (enable) {
+        // 如果启用逐行矫正，也自动启用基础矫正功能
+        if (!output_correction_enabled) {
+            setOutputCorrectionEnabled(true);
+        }
+        
+        // 重置行计数器和历史记录
+        line_count = 0;
+        output_context_history.clear();  // 清理上下文历史
+        
+        LOG_INFO("逐行矫正功能已启用");
+    } else {
+        // 清理上下文历史
+        output_context_history.clear();
+        
+        LOG_INFO("逐行矫正功能已禁用");
+    }
+}
+
+std::string AudioProcessor::correctOutputLine(const std::string& current_line) {
+    LOG_INFO("=== 开始逐行矫正处理 ===");
+    LOG_INFO("输入行: " + current_line.substr(0, 100) + (current_line.length() > 100 ? "..." : ""));
+    LOG_INFO("逐行矫正启用状态: " + std::string(line_by_line_correction_enabled ? "true" : "false"));
+    LOG_INFO("当前行是否为空: " + std::string(current_line.empty() ? "true" : "false"));
+    
+    if (!line_by_line_correction_enabled || current_line.empty()) {
+        LOG_INFO("逐行矫正已禁用或输入为空，直接返回原文本");
+        return current_line;
+    }
+    
+    std::lock_guard<std::mutex> lock(line_correction_mutex);
+    
+    // 增加行计数器
+    line_count++;
+    LOG_INFO("当前处理第 " + std::to_string(line_count) + " 行");
+    
+    // 第一行不进行矫正（没有上下文）
+    if (line_count == 1) {
+        LOG_INFO("第一行输出，跳过矫正: " + current_line.substr(0, 50) + 
+                (current_line.length() > 50 ? "..." : ""));
+        
+        // 仍然需要添加到历史记录中
+        if (output_corrector) {
+            LOG_INFO("添加第一行到历史记录...");
+            try {
+            // 先调用一次逐行矫正来建立历史记录，但返回原始文本
+            output_corrector->correctLineByLine(current_line);
+                LOG_INFO("第一行已添加到历史记录");
+            } catch (const std::exception& e) {
+                LOG_WARNING("添加第一行到历史记录时发生异常: " + std::string(e.what()));
+            }
+        }
+        return current_line;
+    }
+    
+    // 确保输出矫正器已初始化
+    if (!output_corrector) {
+        LOG_INFO("输出矫正器未初始化，尝试初始化...");
+        if (!output_correction_enabled) {
+            LOG_INFO("启用输出矫正功能...");
+            setOutputCorrectionEnabled(true);
+        }
+        if (!output_corrector) {
+            LOG_WARNING("无法初始化输出矫正器，返回原始文本");
+            return current_line;
+        }
+        LOG_INFO("输出矫正器初始化成功");
+    }
+    
+    // 检查服务可用性
+    if (!output_correction_service_checked || !output_correction_service_available) {
+        LOG_INFO("检查DeepSeek矫正服务可用性...");
+        bool service_available = testOutputCorrectionService();
+        if (!service_available) {
+            LOG_WARNING("DeepSeek矫正服务不可用，跳过逐行矫正");
+            return current_line;
+        }
+        LOG_INFO("DeepSeek矫正服务可用");
+    }
+    
+    try {
+        LOG_INFO("正在进行第" + std::to_string(line_count) + "行的逐行矫正...");
+        
+        // 添加超时保护 - 设置一个合理的超时时间
+        auto start_time = std::chrono::system_clock::now();
+        
+        std::string corrected_line = output_corrector->correctLineByLine(current_line);
+        
+        auto end_time = std::chrono::system_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+        LOG_INFO("逐行矫正耗时: " + std::to_string(duration) + " 毫秒");
+        
+        if (corrected_line.empty()) {
+            LOG_WARNING("逐行矫正返回空结果，使用原文本");
+            return current_line;
+        }
+        
+        // 检查结果是否合理
+        if (corrected_line.length() > current_line.length() * 3) {
+            LOG_WARNING("逐行矫正结果异常（长度过大），使用原文本");
+            return current_line;
+        }
+        
+        if (corrected_line != current_line) {
+            LOG_INFO("第" + std::to_string(line_count) + "行矫正完成");
+            LOG_INFO("原文本: " + current_line.substr(0, 50) + (current_line.length() > 50 ? "..." : ""));
+            LOG_INFO("矫正后: " + corrected_line.substr(0, 50) + (corrected_line.length() > 50 ? "..." : ""));
+        } else {
+            LOG_INFO("第" + std::to_string(line_count) + "行无需矫正");
+        }
+        
+        LOG_INFO("=== 逐行矫正处理完成 ===");
+        return corrected_line;
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("逐行矫正时发生异常: " + std::string(e.what()));
+        LOG_INFO("=== 逐行矫正异常结束 ===");
+        return current_line;
+    }
+}
+
+void AudioProcessor::resetOutputLineHistory() {
+    std::lock_guard<std::mutex> lock(line_correction_mutex);
+    
+    line_count = 0;
+    
+    if (output_corrector) {
+        output_corrector->resetLineHistory();
+    }
+    
+    LOG_INFO("输出行历史记录已重置");
+}
+
+// 异步矫正相关方法实现
+void AudioProcessor::startCorrectionThread() {
+    if (correction_thread_running) {
+        LOG_INFO("矫正线程已在运行");
+        return;
+    }
+    
+    correction_thread_running = true;
+    correction_thread = std::thread(&AudioProcessor::processCorrectionQueue, this);
+    LOG_INFO("矫正线程已启动");
+}
+
+void AudioProcessor::stopCorrectionThread() {
+    if (!correction_thread_running) {
+        return;
+    }
+    
+    LOG_INFO("正在停止矫正线程...");
+    correction_thread_running = false;
+    
+    // 通知线程退出
+    correction_cv.notify_all();
+    
+    // 等待线程结束
+    if (correction_thread.joinable()) {
+        correction_thread.join();
+    }
+    
+    // 清理队列
+    {
+        std::lock_guard<std::mutex> lock(pending_corrections_mutex);
+        while (!pending_corrections.empty()) {
+            pending_corrections.pop();
+        }
+    }
+    
+    LOG_INFO("矫正线程已停止");
+}
+
+void AudioProcessor::processCorrectionQueue() {
+    LOG_INFO("矫正处理线程开始运行");
+    
+    // 在子线程中异步初始化矫正器
+    if (output_correction_enabled && !output_corrector) {
+        LOG_INFO("在子线程中初始化矫正器...");
+        initializeCorrectorAsync();
+    }
+    
+    while (correction_thread_running) {
+        std::unique_lock<std::mutex> lock(pending_corrections_mutex);
+        
+        // 等待有任务或收到停止信号
+        correction_cv.wait(lock, [this] {
+            return !pending_corrections.empty() || !correction_thread_running;
+        });
+        
+        if (!correction_thread_running) {
+            break;
+        }
+        
+        // 处理队列中的任务
+        while (!pending_corrections.empty() && correction_thread_running) {
+            PendingCorrectionItem item = pending_corrections.front();
+            pending_corrections.pop();
+            lock.unlock();
+            
+            try {
+                LOG_INFO("处理矫正任务: " + item.source_type + " - 行号: " + std::to_string(item.line_number));
+                
+                // 获取当前上下文
+                std::deque<QString> current_context;
+                {
+                    std::lock_guard<std::mutex> context_lock(line_correction_mutex);
+                    current_context = output_context_history;
+                }
+                
+                // 应用矫正
+                QString corrected_text = applyCorrectionWithContext(item.text, current_context);
+                
+                // 去重处理
+                QString final_text = deduplicateText(corrected_text, current_context);
+                
+                // 更新上下文
+                updateOutputContext(final_text);
+                
+                // 推送到GUI（如果文本有变化且不为空）
+                if (!final_text.isEmpty()) {
+                    if (final_text != item.text) {
+                        LOG_INFO("矫正完成，文本已改变: " + item.text.left(30).toStdString() + " -> " + final_text.left(30).toStdString());
+                        // 避免递归调用，直接调用GUI更新
+                        QMetaObject::invokeMethod(gui, "updateText", Qt::QueuedConnection, 
+                                                Q_ARG(QString, final_text), Q_ARG(QString, QString::fromStdString(item.output_type)));
+                    } else {
+                        LOG_INFO("矫正完成，文本无变化");
+                        QMetaObject::invokeMethod(gui, "updateText", Qt::QueuedConnection, 
+                                                Q_ARG(QString, final_text), Q_ARG(QString, QString::fromStdString(item.output_type)));
+                    }
+                } else {
+                    LOG_INFO("矫正处理后文本为空，跳过输出");
+                }
+                
+            } catch (const std::exception& e) {
+                LOG_ERROR("矫正处理异常: " + std::string(e.what()));
+                // 出错时使用原始文本
+                safePushToGUI(item.text, item.output_type, item.source_type);
+            }
+            
+            lock.lock();
+        }
+    }
+    
+    LOG_INFO("矫正处理线程结束");
+}
+
+void AudioProcessor::enqueueCorrectionTask(const QString& text, const std::string& source_type, const std::string& output_type) {
+    LOG_INFO("=== enqueueCorrectionTask 开始 ===");
+    LOG_INFO("输入文本长度: " + std::to_string(text.length()));
+    LOG_INFO("来源类型: " + source_type);
+    LOG_INFO("输出类型: " + output_type);
+    LOG_INFO("矫正线程运行状态: " + std::string(correction_thread_running ? "true" : "false"));
+    
+    if (!correction_thread_running) {
+        LOG_WARNING("矫正线程未运行，直接推送到GUI避免递归调用");
+        // 直接推送到GUI，避免递归调用safePushToGUI
+        try {
+            bool success = false;
+            if (output_type == "fast") {
+                success = QMetaObject::invokeMethod(gui, "appendFastOutput", 
+                    Qt::QueuedConnection, Q_ARG(QString, text));
+            } else if (output_type == "openai") {
+                success = QMetaObject::invokeMethod(gui, "appendOpenAIOutput", 
+                    Qt::QueuedConnection, Q_ARG(QString, text));
+            } else if (output_type == "final") {
+                success = QMetaObject::invokeMethod(gui, "appendFinalOutput", 
+                    Qt::QueuedConnection, Q_ARG(QString, text));
+            }
+            
+            if (success) {
+                LOG_INFO("直接推送到GUI成功: " + source_type);
+            } else {
+                LOG_ERROR("直接推送到GUI失败: " + source_type);
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("直接推送到GUI时发生异常: " + std::string(e.what()));
+        }
+        return;
+    }
+    
+    PendingCorrectionItem item;
+    item.text = text;
+    item.source_type = source_type;
+    item.output_type = output_type;
+    item.timestamp = std::chrono::system_clock::now();
+    
+    {
+        std::lock_guard<std::mutex> lock(line_correction_mutex);
+        item.line_number = ++line_count;
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(pending_corrections_mutex);
+        pending_corrections.push(item);
+    }
+    
+    correction_cv.notify_one();
+    LOG_INFO("已添加矫正任务到队列: " + source_type + " - 行号: " + std::to_string(item.line_number));
+    LOG_INFO("=== enqueueCorrectionTask 结束 ===");
+}
+
+void AudioProcessor::initializeCorrectorAsync() {
+    try {
+        if (!output_corrector) {
+            output_corrector = std::make_unique<OutputCorrector>(this);
+            output_corrector->setConfig(correction_config);
+            LOG_INFO("矫正器在子线程中初始化成功");
+        }
+        
+        // 检查服务可用性
+        if (!output_correction_service_checked) {
+            LOG_INFO("检查DeepSeek矫正服务可用性...");
+            bool service_available = output_corrector->isServiceAvailable();
+            output_correction_service_checked = true;
+            output_correction_service_available = service_available;
+            
+            if (service_available) {
+                LOG_INFO("DeepSeek矫正服务在子线程中检查通过");
+            } else {
+                LOG_WARNING("DeepSeek矫正服务不可用，矫正功能将被禁用");
+                output_correction_enabled = false;
+            }
+        }
+        
+    } catch (const std::exception& e) {
+        LOG_ERROR("子线程中初始化矫正器失败: " + std::string(e.what()));
+        output_correction_enabled = false;
+    }
+}
+
+QString AudioProcessor::applyCorrectionWithContext(const QString& current_text, const std::deque<QString>& context) {
+    if (!output_correction_enabled || !output_corrector || !line_by_line_correction_enabled) {
+        return current_text;
+    }
+    
+    try {
+        // 构建上下文字符串
+        std::string context_str;
+        for (const auto& line : context) {
+            if (!context_str.empty()) {
+                context_str += "\n";
+            }
+            context_str += line.toStdString();
+        }
+        
+        // 使用修改后的逐行矫正方法，传入上下文
+        if (output_corrector) {
+            // 重置历史记录并添加上下文
+            output_corrector->resetLineHistory();
+            for (const auto& line : context) {
+                output_corrector->correctLineByLine(line.toStdString());
+            }
+            
+            // 矫正当前文本
+            std::string corrected = output_corrector->correctLineByLine(current_text.toStdString());
+            return QString::fromStdString(corrected);
+        }
+        
+    } catch (const std::exception& e) {
+        LOG_WARNING("应用上下文矫正时发生异常: " + std::string(e.what()));
+    }
+    
+    return current_text;
+}
+
+QString AudioProcessor::deduplicateText(const QString& text, const std::deque<QString>& recent_outputs) {
+    if (recent_outputs.empty()) {
+        return text;
+    }
+    
+    // 检查与最近输出的相似度
+    for (const auto& recent : recent_outputs) {
+        if (text == recent) {
+            LOG_INFO("检测到完全重复的文本，跳过输出");
+            return "";  // 返回空字符串表示跳过
+        }
+        
+        // 检查是否是前一行的延续或重复部分
+        if (text.contains(recent) && text.length() > recent.length()) {
+            // 可能是延续，移除重复部分
+            QString deduplicated = text;
+            deduplicated.remove(recent);
+            deduplicated = deduplicated.trimmed();
+            
+            if (!deduplicated.isEmpty()) {
+                LOG_INFO("移除重复部分后: " + deduplicated.left(30).toStdString());
+                return deduplicated;
+            }
+        }
+    }
+    
+    return text;
+}
+
+void AudioProcessor::updateOutputContext(const QString& output) {
+    if (output.isEmpty()) {
+        return;
+    }
+    
+    std::lock_guard<std::mutex> lock(line_correction_mutex);
+    
+    output_context_history.push_back(output);
+    
+    // 限制上下文历史大小
+    while (output_context_history.size() > max_context_lines) {
+        output_context_history.pop_front();
+    }
+    
+    LOG_INFO("更新输出上下文，当前历史行数: " + std::to_string(output_context_history.size()));
+}
+
+// 矫正功能控制方法实现
+void AudioProcessor::setCorrectionEnabled(bool enabled) {
+    LOG_INFO("=== setCorrectionEnabled 开始 ===");
+    LOG_INFO("设置矫正总开关为: " + std::string(enabled ? "true" : "false"));
+    
+    bool old_enabled = output_correction_enabled;
+    setOutputCorrectionEnabled(enabled);
+    
+    if (old_enabled != enabled) {
+        emit correctionEnabledChanged(enabled);
+        
+        QString status = enabled ? "输出矫正功能已启用" : "输出矫正功能已禁用";
+        emit correctionStatusUpdated(status);
+        LOG_INFO("矫正状态已更新: " + status.toStdString());
+    }
+    
+    LOG_INFO("=== setCorrectionEnabled 结束 ===");
+}
+
+void AudioProcessor::setLineCorrectionEnabled(bool enabled) {
+    LOG_INFO("=== setLineCorrectionEnabled 开始 ===");
+    LOG_INFO("设置逐行矫正开关为: " + std::string(enabled ? "true" : "false"));
+    
+    bool old_enabled = line_by_line_correction_enabled;
+    setLineByLineCorrectionEnabled(enabled);
+    
+    if (old_enabled != enabled) {
+        emit lineCorrectionEnabledChanged(enabled);
+        
+        QString status = enabled ? "逐行矫正功能已启用" : "逐行矫正功能已禁用";
+        emit correctionStatusUpdated(status);
+        LOG_INFO("逐行矫正状态已更新: " + status.toStdString());
+    }
+    
+    LOG_INFO("=== setLineCorrectionEnabled 结束 ===");
+}
+
+bool AudioProcessor::isCorrectionEnabled() const {
+    return output_correction_enabled;
+}
+
+bool AudioProcessor::isLineCorrectionEnabled() const {
+    return line_by_line_correction_enabled;
+}
+
+void AudioProcessor::setDefaultCorrectionForRecognizer(RecognitionMode mode) {
+    LOG_INFO("=== setDefaultCorrectionForRecognizer 开始 ===");
+    LOG_INFO("识别器类型: " + std::to_string(static_cast<int>(mode)));
+    
+    bool default_correction = false;
+    bool default_line_correction = false;
+    QString mode_name;
+    
+    switch (mode) {
+        case RecognitionMode::FAST_RECOGNITION:
+            // 本地识别默认启用矫正
+            default_correction = true;
+            default_line_correction = true;
+            mode_name = "本地识别";
+            LOG_INFO("本地识别模式：默认启用矫正功能");
+            break;
+            
+        case RecognitionMode::PRECISE_RECOGNITION:
+            // 服务器识别默认不启用矫正（服务器已经优化过）
+            default_correction = false;
+            default_line_correction = false;
+            mode_name = "服务器识别";
+            LOG_INFO("服务器识别模式：默认禁用矫正功能（服务器结果已优化）");
+            break;
+            
+        case RecognitionMode::OPENAI_RECOGNITION:
+            // OpenAI识别默认启用基础矫正，不启用逐行矫正
+            default_correction = true;
+            default_line_correction = false;
+            mode_name = "OpenAI识别";
+            LOG_INFO("OpenAI识别模式：默认启用基础矫正，禁用逐行矫正");
+            break;
+    }
+    
+    // 只有在设置有变化时才更新
+    bool correction_changed = (output_correction_enabled != default_correction);
+    bool line_correction_changed = (line_by_line_correction_enabled != default_line_correction);
+    
+    if (correction_changed || line_correction_changed) {
+        if (correction_changed) {
+            setCorrectionEnabled(default_correction);
+        }
+        
+        if (line_correction_changed) {
+            setLineCorrectionEnabled(default_line_correction);
+        }
+        
+        QString status = QString("已为%1模式设置默认矫正配置：总开关=%2，逐行矫正=%3")
+                        .arg(mode_name)
+                        .arg(default_correction ? "开启" : "关闭")
+                        .arg(default_line_correction ? "开启" : "关闭");
+        
+        emit correctionStatusUpdated(status);
+        LOG_INFO("矫正默认配置已更新: " + status.toStdString());
+    } else {
+        LOG_INFO("矫正配置无需更新，当前设置已匹配默认值");
+    }
+    
+    LOG_INFO("=== setDefaultCorrectionForRecognizer 结束 ===");
+}
+
+// 全局CUDA清理函数
+void AudioProcessor::globalCUDACleanup() {
+    LOG_INFO("开始全局CUDA清理...");
+    
+    try {
+#ifdef GGML_USE_CUDA
+        // 获取当前设备
+        int current_device = -1;
+        cudaError_t error = cudaGetDevice(&current_device);
+        
+        if (error == cudaSuccess) {
+            LOG_INFO("当前CUDA设备: " + std::to_string(current_device));
+            
+            // 同步所有操作
+            error = cudaDeviceSynchronize();
+            if (error == cudaSuccess) {
+                LOG_INFO("CUDA设备同步成功");
+            } else {
+                LOG_WARNING("CUDA设备同步失败: " + std::string(cudaGetErrorString(error)));
+            }
+            
+            // 重置设备（这会清理所有CUDA内存池）
+            error = cudaDeviceReset();
+            if (error == cudaSuccess) {
+                LOG_INFO("CUDA设备重置成功 - 所有内存池已清理");
+            } else {
+                LOG_WARNING("CUDA设备重置失败: " + std::string(cudaGetErrorString(error)));
+            }
+        } else {
+            LOG_INFO("没有活跃的CUDA设备，跳过清理");
+        }
+#else
+        LOG_INFO("未编译CUDA支持，跳过CUDA清理");
+#endif
+    } catch (const std::exception& e) {
+        LOG_ERROR("CUDA清理时发生异常: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("CUDA清理时发生未知异常");
+    }
+    
+    LOG_INFO("全局CUDA清理完成");
 }

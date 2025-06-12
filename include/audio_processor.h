@@ -22,6 +22,7 @@
 #include <audio_types.h>
 #include <voice_activity_detector.h>
 #include <audio_preprocessor.h>
+#include <output_corrector.h>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QPointer>
@@ -225,6 +226,29 @@ public:
     void setPreEmphasisCoefficient(float coef);
     float getPreEmphasisCoefficient() const { return pre_emphasis_coef; }
     
+    // 输出矫正功能
+    void setOutputCorrectionEnabled(bool enable);
+    bool isOutputCorrectionEnabled() const { return output_correction_enabled; }
+    void setOutputCorrectionConfig(const OutputCorrector::CorrectionConfig& config);
+    bool testOutputCorrectionService();
+    std::string correctOutputText(const std::string& input_text);
+    
+    // 逐行矫正功能
+    void setLineByLineCorrectionEnabled(bool enable);
+    bool isLineByLineCorrectionEnabled() const { return line_by_line_correction_enabled; }
+    std::string correctOutputLine(const std::string& current_line);
+    void resetOutputLineHistory();  // 重置输出行历史记录
+    
+    // 异步矫正相关方法
+    void startCorrectionThread();     // 启动矫正线程
+    void stopCorrectionThread();      // 停止矫正线程
+    void processCorrectionQueue();    // 处理矫正队列（线程函数）
+    void enqueueCorrectionTask(const QString& text, const std::string& source_type, const std::string& output_type);
+    void initializeCorrectorAsync();  // 异步初始化矫正器
+    QString applyCorrectionWithContext(const QString& current_text, const std::deque<QString>& context);
+    QString deduplicateText(const QString& text, const std::deque<QString>& recent_outputs);
+    void updateOutputContext(const QString& output);
+    
     // 添加processAudioFrame方法的声明
     void processAudioFrame(const std::vector<float>& frame_data);
     
@@ -239,6 +263,18 @@ public:
     
     // 静态方法：安全清理所有AudioProcessor实例
     static void cleanupAllInstances();
+    
+    // 全局CUDA清理函数
+    static void globalCUDACleanup();
+    
+    // 矫正功能控制方法
+    void setCorrectionEnabled(bool enabled);           // 设置矫正总开关
+    void setLineCorrectionEnabled(bool enabled);       // 设置逐行矫正开关
+    bool isCorrectionEnabled() const;                  // 获取矫正总开关状态
+    bool isLineCorrectionEnabled() const;              // 获取逐行矫正开关状态
+    
+    // 根据识别器类型设置矫正默认值
+    void setDefaultCorrectionForRecognizer(RecognitionMode mode);
     
     // 检查对象是否已初始化
     bool isInitialized() const { return is_initialized; }
@@ -298,6 +334,11 @@ signals:
     
     // 添加一个新的信号，通知处理已完全停止
     void processingFullyStopped();
+    
+    // 矫正功能状态变化信号
+    void correctionEnabledChanged(bool enabled);
+    void lineCorrectionEnabledChanged(bool enabled);
+    void correctionStatusUpdated(QString status);
     
 private slots:
     // 精确识别网络回复处理槽
@@ -399,6 +440,9 @@ private:
     std::unique_ptr<ParallelOpenAIProcessor> openai_processor;
     bool is_initialized{false};
     
+    // 析构标志，防止重复析构
+    std::atomic<bool> destroying{false};
+    
     // 线程状态变量
     std::atomic<bool> fast_thread_running{false};
     std::atomic<bool> precise_thread_running{false};
@@ -418,6 +462,37 @@ private:
     bool use_pre_emphasis{false};  // 默认不启用预加重
     float pre_emphasis_coef{0.97f}; // 默认预加重系数
     std::unique_ptr<AudioPreprocessor> audio_preprocessor; // 音频预处理器
+    
+    // 输出矫正相关成员变量
+    bool output_correction_enabled{false};  // 默认不启用输出矫正
+    std::unique_ptr<OutputCorrector> output_corrector;  // 输出矫正器
+    OutputCorrector::CorrectionConfig correction_config;  // 矫正配置
+    bool output_correction_service_checked{false};  // 是否已检查服务可用性
+    bool output_correction_service_available{false};  // 服务是否可用
+    
+    // 逐行矫正相关成员变量
+    bool line_by_line_correction_enabled{false};  // 是否启用逐行矫正
+    std::mutex line_correction_mutex;  // 保护逐行矫正操作的互斥锁
+    size_t line_count{0};  // 当前行计数器
+    
+    // 异步矫正处理
+    struct PendingCorrectionItem {
+        QString text;
+        std::string source_type;
+        std::string output_type;
+        std::chrono::system_clock::time_point timestamp;
+        size_t line_number;
+    };
+    
+    std::queue<PendingCorrectionItem> pending_corrections;
+    std::mutex pending_corrections_mutex;
+    std::thread correction_thread;
+    std::atomic<bool> correction_thread_running{false};
+    std::condition_variable correction_cv;
+    
+    // 上下文管理
+    std::deque<QString> output_context_history;  // 保存最近几行的输出
+    static const size_t max_context_lines = 3;   // 最多保存3行上下文
     
     // 批处理相关变量
     std::vector<AudioBuffer> current_batch;

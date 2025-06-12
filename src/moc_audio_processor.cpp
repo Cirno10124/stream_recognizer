@@ -58,6 +58,11 @@ static constexpr auto qt_meta_stringdata_ZN14AudioProcessorE = QtMocHelpers::str
     "subtitlePreviewReady",
     "timestamp",
     "processingFullyStopped",
+    "correctionEnabledChanged",
+    "enabled",
+    "lineCorrectionEnabledChanged",
+    "correctionStatusUpdated",
+    "status",
     "openAIResultReady",
     "preciseResultReceived",
     "request_id",
@@ -77,30 +82,33 @@ Q_CONSTINIT static const uint qt_meta_data_ZN14AudioProcessorE[] = {
       12,       // revision
        0,       // classname
        0,    0, // classinfo
-      14,   14, // methods
+      17,   14, // methods
        0,    0, // properties
        0,    0, // enums/sets
        0,    0, // constructors
        0,       // flags
-      10,       // signalCount
+      13,       // signalCount
 
  // signals: name, argc, parameters, tag, flags, initial metatype offsets
-       1,    1,   98,    2, 0x06,    1 /* Public */,
-       5,    1,  101,    2, 0x06,    3 /* Public */,
-       7,    1,  104,    2, 0x06,    5 /* Public */,
-       9,    1,  107,    2, 0x06,    7 /* Public */,
-      11,    1,  110,    2, 0x06,    9 /* Public */,
-      13,    1,  113,    2, 0x06,   11 /* Public */,
-      15,    1,  116,    2, 0x06,   13 /* Public */,
-      17,    1,  119,    2, 0x06,   15 /* Public */,
-      18,    3,  122,    2, 0x06,   17 /* Public */,
-      20,    0,  129,    2, 0x06,   21 /* Public */,
+       1,    1,  116,    2, 0x06,    1 /* Public */,
+       5,    1,  119,    2, 0x06,    3 /* Public */,
+       7,    1,  122,    2, 0x06,    5 /* Public */,
+       9,    1,  125,    2, 0x06,    7 /* Public */,
+      11,    1,  128,    2, 0x06,    9 /* Public */,
+      13,    1,  131,    2, 0x06,   11 /* Public */,
+      15,    1,  134,    2, 0x06,   13 /* Public */,
+      17,    1,  137,    2, 0x06,   15 /* Public */,
+      18,    3,  140,    2, 0x06,   17 /* Public */,
+      20,    0,  147,    2, 0x06,   21 /* Public */,
+      21,    1,  148,    2, 0x06,   22 /* Public */,
+      23,    1,  151,    2, 0x06,   24 /* Public */,
+      24,    1,  154,    2, 0x06,   26 /* Public */,
 
  // slots: name, argc, parameters, tag, flags, initial metatype offsets
-      21,    1,  130,    2, 0x0a,   22 /* Public */,
-      22,    3,  133,    2, 0x0a,   24 /* Public */,
-      25,    0,  140,    2, 0x0a,   28 /* Public */,
-      26,    1,  141,    2, 0x08,   29 /* Private */,
+      26,    1,  157,    2, 0x0a,   28 /* Public */,
+      27,    3,  160,    2, 0x0a,   30 /* Public */,
+      30,    0,  167,    2, 0x0a,   34 /* Public */,
+      31,    1,  168,    2, 0x08,   35 /* Private */,
 
  // signals: parameters
     QMetaType::Void, 0x80000000 | 3,    4,
@@ -113,12 +121,15 @@ Q_CONSTINIT static const uint qt_meta_data_ZN14AudioProcessorE[] = {
     QMetaType::Void, QMetaType::QString,   16,
     QMetaType::Void, QMetaType::QString, QMetaType::LongLong, QMetaType::LongLong,   16,   19,    6,
     QMetaType::Void,
+    QMetaType::Void, QMetaType::Bool,   22,
+    QMetaType::Void, QMetaType::Bool,   22,
+    QMetaType::Void, QMetaType::QString,   25,
 
  // slots: parameters
     QMetaType::Void, QMetaType::QString,   14,
-    QMetaType::Void, QMetaType::Int, QMetaType::QString, QMetaType::Bool,   23,   14,   24,
+    QMetaType::Void, QMetaType::Int, QMetaType::QString, QMetaType::Bool,   28,   14,   29,
     QMetaType::Void,
-    QMetaType::Void, 0x80000000 | 27,   28,
+    QMetaType::Void, 0x80000000 | 32,   33,
 
        0        // eod
 };
@@ -163,6 +174,15 @@ Q_CONSTINIT const QMetaObject AudioProcessor::staticMetaObject = { {
         QtPrivate::TypeAndForceComplete<qint64, std::false_type>,
         // method 'processingFullyStopped'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        // method 'correctionEnabledChanged'
+        QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        QtPrivate::TypeAndForceComplete<bool, std::false_type>,
+        // method 'lineCorrectionEnabledChanged'
+        QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        QtPrivate::TypeAndForceComplete<bool, std::false_type>,
+        // method 'correctionStatusUpdated'
+        QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        QtPrivate::TypeAndForceComplete<QString, std::false_type>,
         // method 'openAIResultReady'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
         QtPrivate::TypeAndForceComplete<const QString &, std::false_type>,
@@ -195,10 +215,13 @@ void AudioProcessor::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _
         case 7: _t->recognitionResultReady((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
         case 8: _t->subtitlePreviewReady((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[2])),(*reinterpret_cast< std::add_pointer_t<qint64>>(_a[3]))); break;
         case 9: _t->processingFullyStopped(); break;
-        case 10: _t->openAIResultReady((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 11: _t->preciseResultReceived((*reinterpret_cast< std::add_pointer_t<int>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<QString>>(_a[2])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[3]))); break;
-        case 12: _t->fastResultReady(); break;
-        case 13: _t->handlePreciseServerReply((*reinterpret_cast< std::add_pointer_t<QNetworkReply*>>(_a[1]))); break;
+        case 10: _t->correctionEnabledChanged((*reinterpret_cast< std::add_pointer_t<bool>>(_a[1]))); break;
+        case 11: _t->lineCorrectionEnabledChanged((*reinterpret_cast< std::add_pointer_t<bool>>(_a[1]))); break;
+        case 12: _t->correctionStatusUpdated((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 13: _t->openAIResultReady((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 14: _t->preciseResultReceived((*reinterpret_cast< std::add_pointer_t<int>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<QString>>(_a[2])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[3]))); break;
+        case 15: _t->fastResultReady(); break;
+        case 16: _t->handlePreciseServerReply((*reinterpret_cast< std::add_pointer_t<QNetworkReply*>>(_a[1]))); break;
         default: ;
         }
     }
@@ -274,6 +297,27 @@ void AudioProcessor::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _
                 return;
             }
         }
+        {
+            using _q_method_type = void (AudioProcessor::*)(bool );
+            if (_q_method_type _q_method = &AudioProcessor::correctionEnabledChanged; *reinterpret_cast<_q_method_type *>(_a[1]) == _q_method) {
+                *result = 10;
+                return;
+            }
+        }
+        {
+            using _q_method_type = void (AudioProcessor::*)(bool );
+            if (_q_method_type _q_method = &AudioProcessor::lineCorrectionEnabledChanged; *reinterpret_cast<_q_method_type *>(_a[1]) == _q_method) {
+                *result = 11;
+                return;
+            }
+        }
+        {
+            using _q_method_type = void (AudioProcessor::*)(QString );
+            if (_q_method_type _q_method = &AudioProcessor::correctionStatusUpdated; *reinterpret_cast<_q_method_type *>(_a[1]) == _q_method) {
+                *result = 12;
+                return;
+            }
+        }
     }
 }
 
@@ -296,14 +340,14 @@ int AudioProcessor::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 14)
+        if (_id < 17)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 14;
+        _id -= 17;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 14)
+        if (_id < 17)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 14;
+        _id -= 17;
     }
     return _id;
 }
@@ -375,5 +419,26 @@ void AudioProcessor::subtitlePreviewReady(const QString & _t1, qint64 _t2, qint6
 void AudioProcessor::processingFullyStopped()
 {
     QMetaObject::activate(this, &staticMetaObject, 9, nullptr);
+}
+
+// SIGNAL 10
+void AudioProcessor::correctionEnabledChanged(bool _t1)
+{
+    void *_a[] = { nullptr, const_cast<void*>(reinterpret_cast<const void*>(std::addressof(_t1))) };
+    QMetaObject::activate(this, &staticMetaObject, 10, _a);
+}
+
+// SIGNAL 11
+void AudioProcessor::lineCorrectionEnabledChanged(bool _t1)
+{
+    void *_a[] = { nullptr, const_cast<void*>(reinterpret_cast<const void*>(std::addressof(_t1))) };
+    QMetaObject::activate(this, &staticMetaObject, 11, _a);
+}
+
+// SIGNAL 12
+void AudioProcessor::correctionStatusUpdated(QString _t1)
+{
+    void *_a[] = { nullptr, const_cast<void*>(reinterpret_cast<const void*>(std::addressof(_t1))) };
+    QMetaObject::activate(this, &staticMetaObject, 12, _a);
 }
 QT_WARNING_POP

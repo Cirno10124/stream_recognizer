@@ -37,7 +37,8 @@ void SubtitleManager::setSubtitleLabel(QLabel* label)
     subtitleLabel->setAlignment(Qt::AlignCenter);
     subtitleLabel->setWordWrap(true);
     subtitleLabel->setText("");
-    subtitleLabel->setVisible(true);
+    // 初始时隐藏字幕标签，直到有内容显示
+    subtitleLabel->setVisible(false);
     
     LOG_INFO("Subtitle label set");
 }
@@ -172,29 +173,43 @@ void SubtitleManager::addOpenAISubtitle(const QString& text, qint64 startTime, q
 
 void SubtitleManager::updateSubtitleDisplay(qint64 currentTime)
 {
-    if (!subtitleLabel || subtitles.empty()) {
+    if (!subtitleLabel) {
         return;
     }
     
     std::lock_guard<std::mutex> lock(subtitlesMutex);
     
+    // 如果没有字幕数据，清空显示
+    if (subtitles.empty()) {
+        if (currentSubtitleIndex != -1) {
+            subtitleLabel->setText("");
+            subtitleLabel->setVisible(false);
+            currentSubtitleIndex = -1;
+            emit subtitleTextChanged("");
+        }
+        return;
+    }
+    
     // 寻找当前时间对应的字幕
     QString displayText;
+    bool foundSubtitle = false;
     
     // 首先查找匹配当前时间的字幕
     for (size_t i = 0; i < subtitles.size(); ++i) {
         const auto& subtitle = subtitles[i];
         
         if (currentTime >= subtitle.startTime && currentTime <= subtitle.startTime + subtitle.duration) {
-            // 如果找到了匹配的字幕
+            // 如果是翻译文本，且不显示双语，则跳过
+            if (subtitle.source == SubtitleSource::OpenAI && !dualSubtitles) {
+                continue;
+            }
+            
+            // 找到了匹配的字幕
+            foundSubtitle = true;
+            
             if (currentSubtitleIndex != static_cast<int>(i)) {
                 // 新的字幕，更新显示
                 currentSubtitleIndex = static_cast<int>(i);
-                
-                // 如果是翻译文本，且不显示双语，则跳过
-                if (subtitle.source == SubtitleSource::OpenAI && !dualSubtitles) {
-                    continue;
-                }
                 
                 // 添加当前字幕文本
                 displayText = formatSubtitleText(subtitle.text, subtitle.source == SubtitleSource::OpenAI);
@@ -215,15 +230,17 @@ void SubtitleManager::updateSubtitleDisplay(qint64 currentTime)
                 
                 // 更新字幕显示
                 subtitleLabel->setText(displayText);
+                subtitleLabel->setVisible(true);
                 emit subtitleTextChanged(displayText);
             }
-            return;
+            break;
         }
     }
     
     // 如果没有找到匹配的字幕，则清空显示
-    if (currentSubtitleIndex != -1) {
+    if (!foundSubtitle && currentSubtitleIndex != -1) {
         subtitleLabel->setText("");
+        subtitleLabel->setVisible(false);
         currentSubtitleIndex = -1;
         emit subtitleTextChanged("");
     }

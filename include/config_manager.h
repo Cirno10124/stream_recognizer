@@ -39,6 +39,19 @@ public:
     int getStepMs() const;
     int getKeepMs() const;
     int getMaxBuffers() const;
+    
+    // 输出矫正配置
+    bool getOutputCorrectionEnabled() const;
+    void setOutputCorrectionEnabled(bool enabled);
+    bool getLineByLineCorrectionEnabled() const;
+    void setLineByLineCorrectionEnabled(bool enabled);
+    std::string getDeepSeekServerURL() const;
+    void setDeepSeekServerURL(const std::string& url);
+    std::string getDeepSeekModel() const;
+    void setDeepSeekModel(const std::string& model);
+    
+    // 获取配置数据
+    const nlohmann::json& getConfigData() const;
 
 private:
     ConfigManager() = default;

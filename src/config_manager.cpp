@@ -83,11 +83,22 @@ std::string ConfigManager::getTargetLanguage() const {
 }
 
 bool ConfigManager::getDualLanguage() const {
-    return config["recognition"]["dual_language"];
+    return config["recognition"].value("dual_language", false);
 }
 
 bool ConfigManager::getFastMode() const {
+    // 新配置结构：local_recognition.enabled
+    if (config["recognition"].contains("local_recognition") && config["recognition"]["local_recognition"].is_object()) {
+        return config["recognition"]["local_recognition"].value("enabled", false);
+    }
+    // 兼容旧配置格式
+    else if (config["recognition"].contains("fast_mode") && config["recognition"]["fast_mode"].is_boolean()) {
     return config["recognition"]["fast_mode"];
+    } else if (config["recognition"].contains("fast_mode") && config["recognition"]["fast_mode"].is_object()) {
+        return config["recognition"]["fast_mode"].value("enabled", false);
+    } else {
+        return false;  // 默认值
+    }
 }
 
 std::string ConfigManager::getPreciseServerURL() const {
@@ -97,15 +108,17 @@ std::string ConfigManager::getPreciseServerURL() const {
 
 // 识别模式配置（新增）
 RecognitionMode ConfigManager::getRecognitionMode() const {
-    // 从配置文件获取识别模式，默认为快速识别
-    std::string mode = config["recognition"].value("recognition_mode", "fast");
+    // 从配置文件获取识别模式，默认为本地识别
+    std::string mode = config["recognition"].value("recognition_mode", "local");
     
-    if (mode == "precise") {
-        return RecognitionMode::PRECISE_RECOGNITION;
+    if (mode == "server" || mode == "precise") {
+        return RecognitionMode::PRECISE_RECOGNITION;  // 服务器识别模式
     } else if (mode == "openai") {
-        return RecognitionMode::OPENAI_RECOGNITION;
+        // OpenAI模式已移除，回退到本地识别
+        std::cout << "Warning: OpenAI mode detected in config, falling back to Local Recognition" << std::endl;
+        return RecognitionMode::FAST_RECOGNITION;   // 本地识别模式
     } else {
-        return RecognitionMode::FAST_RECOGNITION;  // 默认
+        return RecognitionMode::FAST_RECOGNITION;   // 本地识别模式（默认）
     }
 }
 
@@ -114,13 +127,15 @@ void ConfigManager::setRecognitionMode(RecognitionMode mode) {
     
     switch (mode) {
     case RecognitionMode::FAST_RECOGNITION:
-        mode_str = "fast";
+        mode_str = "local";  // 本地识别模式
         break;
     case RecognitionMode::PRECISE_RECOGNITION:
-        mode_str = "precise";
+        mode_str = "server"; // 服务器识别模式
         break;
     case RecognitionMode::OPENAI_RECOGNITION:
-        mode_str = "openai";
+        // OpenAI模式已移除，回退到本地识别
+        std::cout << "Warning: Attempt to set OpenAI mode, falling back to Local Recognition" << std::endl;
+        mode_str = "local";
         break;
     }
     
@@ -155,4 +170,55 @@ int ConfigManager::getKeepMs() const {
 
 int ConfigManager::getMaxBuffers() const {
     return config["audio"]["max_buffers"];
+}
+
+// 获取配置数据
+const nlohmann::json& ConfigManager::getConfigData() const {
+    return config;
+}
+
+// 输出矫正配置实现
+bool ConfigManager::getOutputCorrectionEnabled() const {
+    return config["output_correction"].value("enabled", false);
+}
+
+void ConfigManager::setOutputCorrectionEnabled(bool enabled) {
+    if (!config.contains("output_correction")) {
+        config["output_correction"] = nlohmann::json::object();
+    }
+    // 确保enabled字段是布尔值，而不是对象
+    config["output_correction"]["enabled"] = enabled;
+}
+
+bool ConfigManager::getLineByLineCorrectionEnabled() const {
+    return config["output_correction"].value("line_by_line_enabled", false);
+}
+
+void ConfigManager::setLineByLineCorrectionEnabled(bool enabled) {
+    if (!config.contains("output_correction")) {
+        config["output_correction"] = nlohmann::json::object();
+    }
+    config["output_correction"]["line_by_line_enabled"] = enabled;
+}
+
+std::string ConfigManager::getDeepSeekServerURL() const {
+    return config["output_correction"].value("deepseek_server_url", "http://localhost:8000");
+}
+
+void ConfigManager::setDeepSeekServerURL(const std::string& url) {
+    if (!config.contains("output_correction")) {
+        config["output_correction"] = nlohmann::json::object();
+    }
+    config["output_correction"]["deepseek_server_url"] = url;
+}
+
+std::string ConfigManager::getDeepSeekModel() const {
+    return config["output_correction"].value("deepseek_model", "deepseek-coder-7b-instruct-v1.5");
+}
+
+void ConfigManager::setDeepSeekModel(const std::string& model) {
+    if (!config.contains("output_correction")) {
+        config["output_correction"] = nlohmann::json::object();
+    }
+    config["output_correction"]["deepseek_model"] = model;
 } 

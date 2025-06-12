@@ -1,4 +1,5 @@
 #include "../include/recognition_service.h"
+#include "../include/text_corrector.h"
 #include "../include/cuda_memory_manager.h"
 #include <iostream>
 #include <fstream>
@@ -39,6 +40,8 @@ struct WAVHeader {
 RecognitionService::RecognitionService(const std::string& model_path)
     : model_path_(model_path), is_initialized_(false), model_ptr_(nullptr), 
       cuda_initialized_(false), cuda_device_id_(0) {
+    // 初始化文本矫正器
+    text_corrector_ = std::make_unique<TextCorrector>();
     initialize();
 }
 
@@ -204,13 +207,62 @@ RecognitionResult RecognitionService::recognizeInternal(const std::string& audio
             }
         }
 
-        // 设置返回结果
+        // 设置基本识别结果
         result.success = true;
-        result.text = transcript;
+        result.original_text = transcript;  // 保存原始识别文本
+        result.text = transcript;           // 默认返回原始文本
         result.confidence = 1.0f; // whisper目前不提供置信度值，使用默认值
         result.processing_time_ms = duration;
         
         std::cout << "识别完成，处理时间: " << duration << "ms, 文本长度: " << transcript.length() << std::endl;
+        
+        // 如果启用了文本矫正，进行矫正处理
+        if (params.enable_correction && !transcript.empty()) {
+            try {
+                // 初始化文本矫正器（如果需要）
+                if (!text_corrector_->isServiceAvailable()) {
+                    if (!text_corrector_->initialize(params.correction_server)) {
+                        std::cerr << "文本矫正服务初始化失败，跳过矫正" << std::endl;
+                        result.correction_error = "矫正服务初始化失败";
+                        return result;
+                    }
+                }
+                
+                // 构建矫正参数
+                CorrectionParams correction_params;
+                correction_params.enable_correction = true;
+                correction_params.temperature = params.correction_temperature;
+                correction_params.max_tokens = params.correction_max_tokens;
+                
+                // 执行文本矫正
+                std::cout << "正在执行文本矫正..." << std::endl;
+                auto correction_result = text_corrector_->correct(transcript, correction_params);
+                
+                if (correction_result.success) {
+                    result.text = correction_result.corrected_text;  // 使用矫正后的文本
+                    result.was_corrected = correction_result.was_corrected;
+                    result.correction_confidence = correction_result.correction_confidence;
+                    result.correction_time_ms = correction_result.correction_time_ms;
+                    
+                    if (correction_result.was_corrected) {
+                        std::cout << "文本矫正成功，耗时: " << correction_result.correction_time_ms << "ms" << std::endl;
+                        std::cout << "原文: " << transcript << std::endl;
+                        std::cout << "矫正: " << correction_result.corrected_text << std::endl;
+                    } else {
+                        std::cout << "文本无需矫正" << std::endl;
+                    }
+                } else {
+                    std::cerr << "文本矫正失败: " << correction_result.error_message << std::endl;
+                    result.correction_error = correction_result.error_message;
+                    // 矫正失败时保持原始识别结果
+                }
+                
+            } catch (const std::exception& e) {
+                std::cerr << "文本矫正过程中出错: " << e.what() << std::endl;
+                result.correction_error = std::string("矫正过程出错: ") + e.what();
+                // 矫正出错时保持原始识别结果
+            }
+        }
         
         return result;
     } catch (const std::exception& e) {

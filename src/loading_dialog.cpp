@@ -1,11 +1,17 @@
-#include "loading_dialog.h"
+﻿#include "loading_dialog.h"
+#include "memory_serializer.h"
 #include <QApplication>
 #include <QThread>
 #include <QMetaObject>
+#include "log_utils.h"
 
 LoadingDialog::LoadingDialog(QWidget* parent)
     : QDialog(parent)
 {
+    LOG_INFO("开始创建LoadingDialog");
+    
+    // 使用串行分配器确保所有UI组件在主线程中创建
+    MemorySerializer::getInstance().executeSerial([this]() {
     setWindowTitle("Loading Models");
     setFixedSize(400, 150);
     setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
@@ -43,40 +49,57 @@ LoadingDialog::LoadingDialog(QWidget* parent)
         "    border-radius: 10px;"
         "}"
     );
+        
+        LOG_INFO("LoadingDialog UI组件创建完成");
+    });
+    
+    LOG_INFO("LoadingDialog构造函数完成");
+}
+
+LoadingDialog::~LoadingDialog() {
+    LOG_INFO("开始销毁LoadingDialog");
+    
+    // 使用串行分配器确保安全销毁UI组件
+    MemorySerializer::getInstance().executeSerial([this]() {
+        // Qt的父子关系会自动处理子组件的销毁
+        // 这里只需要确保指针安全
+        messageLabel = nullptr;
+        progressBar = nullptr;
+        LOG_INFO("LoadingDialog UI组件引用已清空");
+    });
+    
+    LOG_INFO("LoadingDialog析构函数完成");
 }
 
 void LoadingDialog::setMessage(const QString& message)
 {
-    // 确保在主线程中更新GUI
-    if (QThread::currentThread() == this->thread()) {
+    // 使用串行分配器确保线程安全的GUI更新
+    MemorySerializer::getInstance().executeSerial([this, message]() {
+        if (messageLabel) {
         messageLabel->setText(message);
-    } else {
-        QMetaObject::invokeMethod(this, [this, message]() {
-    messageLabel->setText(message);
-        }, Qt::QueuedConnection);
+            LOG_INFO("LoadingDialog消息更新: " + message.toStdString());
     }
+    });
 }
 
 void LoadingDialog::setProgress(int value)
 {
-    // 确保在主线程中更新GUI
-    if (QThread::currentThread() == this->thread()) {
+    // 使用串行分配器确保线程安全的GUI更新
+    MemorySerializer::getInstance().executeSerial([this, value]() {
+        if (progressBar) {
         progressBar->setValue(value);
-    } else {
-        QMetaObject::invokeMethod(this, [this, value]() {
-    progressBar->setValue(value);
-        }, Qt::QueuedConnection);
+            LOG_INFO("LoadingDialog进度更新: " + std::to_string(value));
     }
+    });
 }
 
 void LoadingDialog::setMaximum(int maximum)
 {
-    // 确保在主线程中更新GUI
-    if (QThread::currentThread() == this->thread()) {
+    // 使用串行分配器确保线程安全的GUI更新
+    MemorySerializer::getInstance().executeSerial([this, maximum]() {
+        if (progressBar) {
         progressBar->setMaximum(maximum);
-    } else {
-        QMetaObject::invokeMethod(this, [this, maximum]() {
-    progressBar->setMaximum(maximum);
-        }, Qt::QueuedConnection);
+            LOG_INFO("LoadingDialog最大值设置: " + std::to_string(maximum));
     }
+    });
 } 

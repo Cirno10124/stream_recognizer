@@ -10,6 +10,7 @@
 #include <QStandardPaths>
 #include <QDebug>
 #include <log_utils.h>
+#include "memory_serializer.h"
 #include <iostream>
 #include <exception>
 #include <signal.h>
@@ -23,9 +24,19 @@
 // 全局变量定义
 bool g_use_gpu = true;
 
+// 防止信号处理递归调用的标志
+static std::atomic<bool> signal_handling_in_progress{false};
+
 // 信号处理函数，用于捕获崩溃
 void signalHandler(int signal) {
     std::cerr << "捕获到信号: " << signal << std::endl;
+    
+    // 防止递归调用信号处理函数
+    if (signal_handling_in_progress.exchange(true)) {
+        std::cerr << "信号处理已在进行中，避免递归调用" << std::endl;
+        exit(signal);
+        return;
+    }
     
     // 尝试清理所有AudioProcessor实例
     try {
@@ -66,6 +77,10 @@ int main(int argc, char* argv[]) {
         // 设置应用程序信息
         QCoreApplication::setOrganizationName("StreamRecognizer");
         QCoreApplication::setApplicationName("WhisperApp");
+    
+    // 初始化内存串行分配器
+    MemorySerializer::getInstance().initialize();
+    LOG_INFO("内存串行分配器已初始化");
     
     // 添加字体支持
     QFont font("Microsoft YaHei", 9);  // 使用微软雅黑字体
@@ -113,6 +128,9 @@ int main(int argc, char* argv[]) {
     // 然后创建音频处理器，并传入GUI指针
     std::unique_ptr<AudioProcessor> processor = std::make_unique<AudioProcessor>(gui.get());
     
+    // 将AudioProcessor设置到GUI中，避免GUI再次创建
+    gui->setAudioProcessor(processor.get());
+    
     // 在Qt multimedia初始化完成后，安全初始化VAD
     LOG_INFO("开始安全初始化VAD实例...");
     if (!processor->initializeVADSafely()) {
@@ -131,35 +149,35 @@ int main(int argc, char* argv[]) {
     // 预加载模型 - 从配置文件获取模型路径
     std::atomic<bool> loading_success{false};
     
-    // 使用线程安全的进度回调
+    // 使用串行分配器的线程安全进度回调
     auto progress_callback = [&loadingDialog](const std::string& message) {
-        // 在主线程中安全更新对话框
-        QMetaObject::invokeMethod(&loadingDialog, [&loadingDialog, message]() {
+        // 使用串行分配器在主线程中安全更新对话框
+        MemorySerializer::getInstance().executeSerial([&loadingDialog, message]() {
             loadingDialog.setMessage(QString::fromStdString(message));
             loadingDialog.setProgress(loadingDialog.progress() + 1);
-        }, Qt::QueuedConnection);
-        
-        // 处理Qt事件以更新UI
+            
+            // 处理Qt事件以更新UI
             QApplication::processEvents();
+        });
     };
     
     bool success = processor->preloadModels(progress_callback);
     
     if (!success) {
-        // 安全关闭对话框
-        QMetaObject::invokeMethod(&loadingDialog, [&loadingDialog]() {
+        // 使用串行分配器安全关闭对话框
+        MemorySerializer::getInstance().executeSerial([&loadingDialog]() {
             loadingDialog.close();
-        }, Qt::QueuedConnection);
+        });
         
         QApplication::processEvents();
         QMessageBox::critical(nullptr, "Error", "Failed to load models");
         return 1;
     }
     
-    // 安全关闭加载对话框
-    QMetaObject::invokeMethod(&loadingDialog, [&loadingDialog]() {
-    loadingDialog.close();
-    }, Qt::QueuedConnection);
+    // 使用串行分配器安全关闭加载对话框
+    MemorySerializer::getInstance().executeSerial([&loadingDialog]() {
+        loadingDialog.close();
+    });
     
     QApplication::processEvents();
     
@@ -244,6 +262,16 @@ int main(int argc, char* argv[]) {
         LOG_ERROR("析构对象时发生异常: " + std::string(e.what()));
     } catch (...) {
         LOG_ERROR("析构对象时发生未知异常");
+    }
+    
+    // 清理内存串行分配器
+    try {
+        MemorySerializer::getInstance().cleanup();
+        LOG_INFO("内存串行分配器清理完成");
+    } catch (const std::exception& e) {
+        LOG_ERROR("清理内存串行分配器时发生异常: " + std::string(e.what()));
+    } catch (...) {
+        LOG_ERROR("清理内存串行分配器时发生未知异常");
     }
     
     LOG_INFO("程序正常退出，返回码: " + std::to_string(result));

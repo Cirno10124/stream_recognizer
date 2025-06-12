@@ -45,6 +45,9 @@ class WhisperGUI : public QMainWindow {
 public:
     explicit WhisperGUI(QWidget *parent = nullptr);
     ~WhisperGUI();
+    
+    // 设置AudioProcessor实例（避免重复创建）
+    void setAudioProcessor(AudioProcessor* processor);
 
 
 
@@ -116,6 +119,11 @@ public slots:
     void validateStreamConnection();
     void onStreamValidationFinished();
     
+    // 矫正控制相关槽函数
+    void onCorrectionEnabledChanged(bool enabled);
+    void onLineCorrectionEnabledChanged(bool enabled);
+    void onCorrectionStatusUpdated(const QString& status);
+    
     // 添加获取视频组件的方法到 slots 中
     QVideoWidget* getVideoWidget() { return videoWidget; }
 
@@ -166,7 +174,10 @@ private:
     QCheckBox* dualSubtitlesCheckBox;
     QPushButton* exportSubtitlesButton;
     
-
+    // 矫正控制相关UI元素
+    QCheckBox* enableCorrectionCheckBox;
+    QCheckBox* enableLineCorrectionCheckBox;
+    QLabel* correctionStatusLabel;
     
     // 媒体控制
     QMediaPlayer* mediaPlayer;
@@ -189,4 +200,5 @@ private:
     
     // 音频处理器
     AudioProcessor* audioProcessor;
+    bool audioProcessorOwnedByGUI;  // 标记AudioProcessor是否由GUI拥有
 }; 

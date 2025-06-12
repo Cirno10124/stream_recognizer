@@ -102,6 +102,12 @@
     <ClCompile Include="src\audio_preprocessor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\output_corrector.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\moc_output_corrector.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\ggml.h">
@@ -161,10 +167,8 @@
     <ClInclude Include="include\audio_preprocessor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="include\audio_processor.h.bak">
+    <ClInclude Include="include\output_corrector.h">
       <Filter>Header Files</Filter>
-    </None>
+    </ClInclude>
   </ItemGroup>
 </Project>
