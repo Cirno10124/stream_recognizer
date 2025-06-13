@@ -303,6 +303,13 @@ public:
     // 强制处理待处理的音频数据
     void processPendingAudioData();
     
+    // 添加静音对比检测方法声明
+    bool isSimilarToSilence(const std::vector<float>& audio_buffer, float threshold = 0.001f) const;
+    
+    // 音频截断保护相关方法
+    void enableAudioTruncationProtection(bool enable = true);
+    bool validateAudioSegmentCompleteness(const std::vector<float>& audio_data) const;
+    
 public slots:
     // 从ResultMerger接收结果
     void openAIResultReady(const QString& result);

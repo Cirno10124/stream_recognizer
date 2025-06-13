@@ -105,7 +105,7 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
     , is_initialized(false)
     , use_realtime_segments(false)
     , use_openai(false)
-    , use_pre_emphasis(true)
+    , use_pre_emphasis(false)
     , use_dual_segment_recognition(false)
     , fast_mode(false)
     , dual_language(false)
@@ -291,6 +291,9 @@ AudioProcessor::AudioProcessor(WhisperGUI* gui, QObject* parent)
     
     // 设置初始化完成标志
     is_initialized = true;
+        
+        // 默认启用音频截断保护
+        enableAudioTruncationProtection(true);
         
         LOG_INFO("AudioProcessor initialization completed");
         LOG_INFO("Default recognition mode: " + std::to_string(static_cast<int>(current_recognition_mode)) + " (0=Fast, 1=Precise, 2=OpenAI)");
@@ -5378,27 +5381,11 @@ void AudioProcessor::processAudio() {
                     if (current_recognition_mode == RecognitionMode::FAST_RECOGNITION) {
                         std::unique_lock<std::mutex> lock(request_mutex, std::try_to_lock);
                         if (lock.owns_lock()) {
-                            // 调用fastResultReady检查和处理结果
-                            fastResultReady();
-                            
-                            // 检查final_results队列是否还有待处理的结果
-                            RecognitionResult result;
-                            while (final_results && final_results->pop(result, false)) {
+                            // 延迟期间不主动调用fastResultReady，避免重复处理
+                            // 只检查是否还有结果等待处理
+                            if (final_results && !final_results->isEmpty()) {
                                 has_activity = true;
-                                
-                                if (!result.is_last && !result.text.empty()) {
-                                    if (gui) {
-                                        QMetaObject::invokeMethod(gui, "appendFinalOutput", 
-                                            Qt::QueuedConnection, Q_ARG(QString, QString::fromStdString(result.text)));
-                                        
-                                        LOG_INFO("延迟期间处理识别结果：" + result.text);
-                                    }
-                                    
-                                    // 添加字幕
-                                    if (subtitle_manager) {
-                                        subtitle_manager->addWhisperSubtitle(result);
-                                    }
-                                }
+                                LOG_INFO("延迟期间检测到待处理的识别结果，等待主循环处理");
                             }
                         }
                     }
@@ -5451,38 +5438,10 @@ void AudioProcessor::processAudio() {
             // 等待更长时间确保所有结果都已处理完成
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             
-            // 循环检查直到没有更多结果
-            for (int i = 0; i < 10; i++) {  // 最多检查10次
-                bool has_more = false;
-                
-                RecognitionResult result;
-                if (final_results && final_results->pop(result, false)) {
-                    has_more = true;
-                    
-                    // 如果不是结束标记且文本不为空，则处理结果
-                    if (!result.is_last && !result.text.empty()) {
-                        if (gui) {
-                            QMetaObject::invokeMethod(gui, "appendFinalOutput", 
-                                Qt::QueuedConnection, Q_ARG(QString, QString::fromStdString(result.text)));
-                            
-                            LOG_INFO("最终检查: 快速识别结果已推送到GUI：" + result.text);
-                        }
-                        
-                        // 添加字幕
-                        if (subtitle_manager) {
-                            subtitle_manager->addWhisperSubtitle(result);
-                        }
-                    }
-                }
-                
-                // 如果没有更多结果，退出循环
-                if (!has_more) {
-                    break;
-                }
-                
-                // 短暂等待继续检查
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            }
+            // 统一通过fastResultReady处理，避免重复推送
+            // 最终检查一次结果，只处理一次避免重复
+            fastResultReady();
+            LOG_INFO("最终检查: 快速识别结果处理完成");
         }
         
         // 确保处理最后一个批次
@@ -5844,13 +5803,17 @@ void AudioProcessor::processAudioFrame(const std::vector<float>& frame_data) {
 
 // 添加新方法：处理快速识别模式的结果并显示到GUI
 void AudioProcessor::fastResultReady() {
-    // 从final_results队列中非阻塞地获取结果
+    // 循环处理队列中的所有结果，避免遗漏
     RecognitionResult result;
-    if (final_results && final_results->pop(result, false)) {
+    int processed_count = 0;
+    
+    while (final_results && final_results->pop(result, false)) {
+        processed_count++;
+        
         // 检查结果是否为结束标记
         if (result.is_last) {
             LOG_INFO("收到快速识别的结束标记");
-            return;
+            continue; // 继续处理其他结果
         }
         
         // 检查结果文本是否有效
@@ -5868,6 +5831,16 @@ void AudioProcessor::fastResultReady() {
                 LOG_INFO("快速识别结果未推送（可能是重复）：" + result.text);
             }
         }
+        
+        // 防止无限循环，最多处理10个结果
+        if (processed_count >= 10) {
+            LOG_WARNING("fastResultReady: 处理结果过多，可能存在异常，中断处理");
+            break;
+        }
+    }
+    
+    if (processed_count > 0) {
+        LOG_INFO("fastResultReady: 本次处理了 " + std::to_string(processed_count) + " 个识别结果");
     }
 }
 
@@ -7151,12 +7124,30 @@ bool AudioProcessor::startStreamAudioExtraction() {
                                             stream_consecutive_silence_frames = 0;  // 重置静音计数
                                         }
                                         
-                                        // 检测到连续静音时标记语音结束
-                                        if (stream_consecutive_silence_frames >= stream_silence_threshold_frames) {
+                                        // 增加语音结束检测的宽容度，避免截断最后几个字
+                                        // 从原来的可能很低的阈值提高到更安全的值
+                                        const int extended_silence_threshold = std::max(stream_silence_threshold_frames, 25); // 至少25帧(~0.5秒)
+                                        
+                                        if (stream_consecutive_silence_frames >= extended_silence_threshold) {
+                                            // 额外验证：检查最近的音频能量是否真的很低
+                                            float recent_energy = 0.0f;
+                                            for (const float& sample : float_samples) {
+                                                recent_energy += sample * sample;
+                                            }
+                                            recent_energy /= float_samples.size();
+                                            
+                                            // 只有在能量确实很低时才标记语音结束
+                                            const float energy_threshold = 0.001f; // 调整能量阈值
+                                            if (recent_energy < energy_threshold) {
                                             buffer.voice_end = true;
                                             stream_consecutive_silence_frames = 0;  // 重置计数
                                             last_force_segment_time = current_time;  // 重置强制分段计时器
-                                            LOG_INFO("流音频：检测到连续静音，标记语音段结束");
+                                                LOG_INFO("流音频：检测到连续静音且能量低，标记语音段结束");
+                                            } else {
+                                                // 能量不够低，可能还有语音，重置部分计数
+                                                stream_consecutive_silence_frames = std::max(0, stream_consecutive_silence_frames - 5);
+                                                LOG_DEBUG("流音频：虽然检测到静音但能量较高，可能仍有语音");
+                                            }
                                         }
                                     }
                                     
@@ -7335,6 +7326,57 @@ bool AudioProcessor::startStreamAudioExtraction() {
 bool AudioProcessor::hasActiveRecognitionRequests() const {
     std::lock_guard<std::mutex> lock(active_requests_mutex);
     return !active_requests.empty();
+}
+
+// 静音检测方法实现
+bool AudioProcessor::isSimilarToSilence(const std::vector<float>& audio_buffer, float threshold) const {
+    if (audio_buffer.empty()) return true;
+    
+    float energy = 0.0f;
+    for (const float& sample : audio_buffer) {
+        energy += sample * sample;
+    }
+    energy /= audio_buffer.size();
+    
+    return energy < threshold;
+}
+
+// 启用音频截断保护
+void AudioProcessor::enableAudioTruncationProtection(bool enable) {
+    // 设置更保守的VAD参数
+    if (enable && voice_detector) {
+        voice_detector->setSilenceDuration(800); // 增加到800ms静音才认为语音结束
+        LOG_INFO("已启用音频截断保护：VAD静音检测时长设置为800ms");
+    } else if (!enable && voice_detector) {
+        voice_detector->setSilenceDuration(400); // 恢复到较短的400ms
+        LOG_INFO("已禁用音频截断保护：VAD静音检测时长恢复为400ms");
+    }
+}
+
+// 验证音频段的完整性
+bool AudioProcessor::validateAudioSegmentCompleteness(const std::vector<float>& audio_data) const {
+    if (audio_data.empty()) {
+        return false;
+    }
+    
+    // 检查音频段是否突然结束（最后100ms是否有明显的音频活动）
+    size_t samples_to_check = std::min(static_cast<size_t>(1600), audio_data.size()); // 100ms @ 16kHz
+    size_t start_pos = audio_data.size() - samples_to_check;
+    
+    float end_energy = 0.0f;
+    for (size_t i = start_pos; i < audio_data.size(); i++) {
+        end_energy += audio_data[i] * audio_data[i];
+    }
+    end_energy /= samples_to_check;
+    
+    // 如果末尾能量过高，可能存在截断
+    const float truncation_threshold = 0.01f;
+    if (end_energy > truncation_threshold) {
+        LOG_WARNING("检测到可能的音频截断：音频段末尾能量过高(" + std::to_string(end_energy) + ")");
+        return false;
+    }
+    
+    return true;
 }
 
 void AudioProcessor::processPendingAudioData() {

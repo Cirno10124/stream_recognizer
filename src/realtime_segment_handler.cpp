@@ -271,6 +271,25 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         LOG_INFO("准备生成音频段，当前缓冲区数量: " + std::to_string(current_buffers.size()) + 
                 ", 总样本数: " + std::to_string(total_samples));
         
+        // 添加音频段末尾缓冲：为了避免截断最后几个字，添加短暂的静音
+        if (buffer.voice_end || buffer.is_last) {
+            // 在语音段结束时添加200ms的缓冲时间
+            size_t buffer_samples = 16000 * 0.2; // 200ms @ 16kHz
+            AudioBuffer padding_buffer;
+            padding_buffer.data.resize(buffer_samples, 0.0f); // 静音填充
+            padding_buffer.sample_rate = 16000;
+            padding_buffer.channels = 1;
+            padding_buffer.timestamp = std::chrono::system_clock::now();
+            padding_buffer.is_silence = true;
+            padding_buffer.voice_end = false;
+            padding_buffer.is_last = buffer.is_last;
+            
+            current_buffers.push_back(padding_buffer);
+            total_samples += buffer_samples;
+            
+            LOG_INFO("添加了200ms缓冲以避免音频截断，新增样本数: " + std::to_string(buffer_samples));
+        }
+        
         // 生成音频段
         std::string segment_path = createSegment(current_buffers);
         

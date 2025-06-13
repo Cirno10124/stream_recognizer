@@ -462,16 +462,21 @@ bool VoiceActivityDetector::process(AudioBuffer& audio_buffer, float threshold) 
 
 // 设置语音结束检测的静音时长(毫秒)
 void VoiceActivityDetector::setSilenceDuration(size_t silence_ms) {
-    // 计算对应的帧数 (假设帧长为50ms)
+    // 计算对应的帧数 (假设帧长为20ms，而不是之前的50ms)
     required_silence_frames = silence_ms / 20;
     
-    // 确保至少有1帧
-    if (required_silence_frames < 1) {
-        required_silence_frames = 1;
+    // 确保至少有5帧，提供更好的容错性
+    if (required_silence_frames < 5) {
+        required_silence_frames = 5;
+    }
+    
+    // 增加最大限制，避免过长的静音检测
+    if (required_silence_frames > 100) { // 最多2秒
+        required_silence_frames = 100;
     }
     
     std::cout << "语音结束检测:设置连续静音时长为" << silence_ms 
-              << "ms (" << required_silence_frames << "帧)" << std::endl;
+              << "ms (" << required_silence_frames << "帧，调整后更保守)" << std::endl;
 }
 
 // 重置语音结束检测状态
@@ -486,8 +491,8 @@ bool VoiceActivityDetector::updateVoiceState(bool is_silence) {
     // 更新静音历史
     silence_history.push_back(is_silence);
     
-    // 保持历史记录不超过所需帧数的2倍
-    while (silence_history.size() > required_silence_frames * 2) {
+    // 保持历史记录不超过所需帧数的3倍，增加历史深度
+    while (silence_history.size() > required_silence_frames * 3) {
         silence_history.pop_front();
     }
     
@@ -497,19 +502,43 @@ bool VoiceActivityDetector::updateVoiceState(bool is_silence) {
         
         // 检查是否达到所需的连续静音帧数
         if (silence_frames_count >= required_silence_frames) {
-            // 检查之前是否有足够的非静音帧(至少3帧)
+            // 更严格的语音帧检查：检查历史中是否有足够的非静音帧
             size_t voice_frames = 0;
-            for (size_t i = 0; i < silence_history.size() - required_silence_frames; i++) {
+            size_t recent_voice_frames = 0;
+            
+            // 统计总的语音帧数
+            for (size_t i = 0; i < silence_history.size(); i++) {
                 if (!silence_history[i]) {
                     voice_frames++;
+                    // 统计最近一半历史中的语音帧
+                    if (i >= silence_history.size() / 2) {
+                        recent_voice_frames++;
+                    }
                 }
             }
             
-            // 只有在之前有足够的语音帧时才标记为语音结束
-            if (voice_frames >= 3) {
+            // 增加更严格的条件：
+            // 1. 总语音帧要足够多（至少10帧，约200ms）
+            // 2. 最近历史中也要有一定的语音帧（避免刚开始就被误判）
+            // 3. 静音帧数要真的达到要求
+            bool enough_total_voice = voice_frames >= 10;
+            bool has_recent_voice = recent_voice_frames >= 2;
+            bool enough_silence = silence_frames_count >= required_silence_frames;
+            
+            if (enough_total_voice && has_recent_voice && enough_silence) {
                 speech_ended = true;
                 std::cout << "检测到语音结束:连续" << silence_frames_count 
-                          << "帧静音,之前有" << voice_frames << "帧语音" << std::endl;
+                          << "帧静音,历史中有" << voice_frames << "帧语音(最近" 
+                          << recent_voice_frames << "帧语音)" << std::endl;
+            } else {
+                // 记录为什么没有标记为语音结束
+                if (!enough_total_voice) {
+                    std::cout << "语音帧数不足(" << voice_frames << "/10)，不标记语音结束" << std::endl;
+                } else if (!has_recent_voice) {
+                    std::cout << "最近语音帧数不足(" << recent_voice_frames << "/2)，不标记语音结束" << std::endl;
+                }
+                // 适当减少静音计数，给后续语音更多机会
+                silence_frames_count = std::max(0, static_cast<int>(silence_frames_count) - 2);
             }
         }
     } else {
