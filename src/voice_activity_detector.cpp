@@ -22,11 +22,11 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
     , silence_counter(0)
     , voice_counter(0)
     , min_voice_frames(3)     // 减小至3帧提高响应速度
-    , voice_hold_frames(8)    // 稍微减小保持帧数
-    , vad_mode(3)             // 默认使用最敏感模式
+    , voice_hold_frames(10)    // 稍微减小保持帧数
+    , vad_mode(2)             // 默认使用最敏感模式
     , vad_instance(nullptr)
     , silence_frames_count(0)
-    , required_silence_frames(12) // 默认0.6秒 (12帧 * 50ms/帧)
+    , required_silence_frames(20) // 默认0.6秒 (12帧 * 30ms/帧)
     , speech_ended(false)
 {
     // 初始化静音历史

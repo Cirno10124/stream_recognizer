@@ -225,6 +225,17 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         should_create_segment = true;
         LOG_INFO("收到最后缓冲区，生成最终段");
         
+        // 处理最后缓冲区前的累积静音
+        if (!silence_buffers.empty()) {
+            // 保留所有累积的短静音
+            for (const auto& silence_buf : silence_buffers) {
+                current_buffers.push_back(silence_buf);
+                total_samples += silence_buf.data.size();
+            }
+            LOG_INFO("最后段保留了所有累积静音: " + std::to_string(silence_buffers.size()) + " 个缓冲区");
+            silence_buffers.clear();
+        }
+        
         // 即使当前缓冲区是空的，也要添加到current_buffers以确保处理
         // 但只有在数据不为空时才添加样本数
         if (!buffer.data.empty()) {
@@ -233,7 +244,65 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         } else {
             LOG_INFO("最后缓冲区为空，但仍会强制处理之前积累的音频数据");
         }
+    } else if (buffer.is_silence) {
+        // 静音缓冲区：应用短静音保留策略
+        silence_buffers.push_back(buffer);
+        
+        // 计算累积的静音时长
+        size_t total_silence_samples = 0;
+        for (const auto& silence_buf : silence_buffers) {
+            total_silence_samples += silence_buf.data.size();
+        }
+        
+        // 静音时长阈值：300ms以下的静音保留，超过300ms的静音触发分段
+        const size_t max_silence_samples = SAMPLE_RATE * 0.3;  // 300ms @ 16kHz
+        
+        if (total_silence_samples > max_silence_samples) {
+            // 长静音：触发分段
+            if (!current_buffers.empty()) {
+                // 保留前100ms的静音作为自然停顿
+                const size_t keep_silence_samples = SAMPLE_RATE * 0.1;  // 100ms
+                size_t added_silence = 0;
+                
+                for (const auto& silence_buf : silence_buffers) {
+                    if (added_silence < keep_silence_samples) {
+                        AudioBuffer partial_silence = silence_buf;
+                        size_t samples_to_add = std::min(silence_buf.data.size(), 
+                                                       keep_silence_samples - added_silence);
+                        partial_silence.data.resize(samples_to_add);
+                        current_buffers.push_back(partial_silence);
+                        total_samples += samples_to_add;
+                        added_silence += samples_to_add;
+                    } else {
+                        break;
+                    }
+                }
+                
+                should_create_segment = true;
+                LOG_INFO("长静音触发分段，保留了" + std::to_string(added_silence * 1000.0 / SAMPLE_RATE) 
+                        + "ms静音作为自然停顿");
+            }
+            silence_buffers.clear();
+        }
+        // 短静音：继续累积，等待后续处理
     } else {
+        // 非静音缓冲区
+        
+        // 如果之前有累积的短静音，全部添加到当前分段（保持自然节奏）
+        if (!silence_buffers.empty()) {
+            size_t total_silence_samples = 0;
+            for (const auto& silence_buf : silence_buffers) {
+                current_buffers.push_back(silence_buf);
+                total_samples += silence_buf.data.size();
+                total_silence_samples += silence_buf.data.size();
+            }
+            
+            LOG_INFO("保留了" + std::to_string(total_silence_samples * 1000.0 / SAMPLE_RATE) 
+                    + "ms短静音，维持语音自然节奏");
+            
+            silence_buffers.clear();
+        }
+        
         // 非最后缓冲区，正常添加到当前缓冲区
         current_buffers.push_back(buffer);
         total_samples += buffer.data.size();
@@ -310,6 +379,7 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         
         // 清理当前缓冲区
         current_buffers.clear();
+        silence_buffers.clear();  // 也清理静音缓冲区
         total_samples = 0;
         segment_count++;
         
@@ -373,6 +443,7 @@ void RealtimeSegmentHandler::flushCurrentSegment() {
         
         // 清理当前缓冲区
         current_buffers.clear();
+        silence_buffers.clear();  // 也清理静音缓冲区
         total_samples = 0;
         segment_count++;
         

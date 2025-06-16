@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QDebug>
+#include <QDateTime>
 
 AudioCapture::AudioCapture(AudioQueue* queue, QObject* parent)
     : QObject(parent)
@@ -201,11 +202,19 @@ void AudioCapture::enableRealtimeSegmentation(bool enable, size_t segment_size_m
         // 停止当前分段处理器
         segment_handler->stop();
         
-        // 用新的参数创建分段处理器
+        // 用新的参数创建分段处理器，使用统一的临时目录
+        QDir temp_dir = QDir::temp();
+        QString audio_temp_folder = "stream_recognizer_audio";
+        if (!temp_dir.exists(audio_temp_folder)) {
+            temp_dir.mkpath(audio_temp_folder);
+        }
+        temp_dir.cd(audio_temp_folder);
+        std::string unified_temp_dir = temp_dir.absolutePath().toStdString();
+        
         segment_handler = std::make_unique<RealtimeSegmentHandler>(
             segment_size_ms,
             overlap_ms,
-            "",  // 使用默认临时目录
+            unified_temp_dir,  // 使用统一的临时目录
             [this](const AudioSegment& segment) {
                 this->onSegmentReady(segment);
             },
@@ -244,12 +253,20 @@ QString AudioCapture::saveTempAudioSegment(const QByteArray& audioData, bool isL
     QDir temp_dir = QDir::temp();
     QString temp_path;
     
+    // 使用与其他临时文件相同的目录结构
+    QString audio_temp_folder = "stream_recognizer_audio";
+    if (!temp_dir.exists(audio_temp_folder)) {
+        temp_dir.mkpath(audio_temp_folder);
+    }
+    temp_dir.cd(audio_temp_folder);
+    
     // 使用静态计数器作为序列号
     static std::atomic<int> segment_counter{0};
     int current_segment = segment_counter.fetch_add(1);
     
-    // 创建文件名包含序列号
-    temp_path = temp_dir.absoluteFilePath(QString("audio_segment_%1.wav").arg(current_segment));
+    // 创建文件名包含序列号，与其他临时文件命名保持一致
+    QString timestamp = QString::number(QDateTime::currentMSecsSinceEpoch());
+    temp_path = temp_dir.absoluteFilePath(QString("audio_segment_%1_%2.wav").arg(current_segment).arg(timestamp));
     
     // 保存音频数据到文件
     QFile file(temp_path);

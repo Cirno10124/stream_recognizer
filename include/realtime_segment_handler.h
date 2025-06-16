@@ -118,6 +118,7 @@ private:
     
     std::vector<AudioBuffer> current_buffers;  // 当前累积的缓冲区
     std::vector<float> overlap_buffer;         // 重叠部分的缓冲区
+    std::vector<AudioBuffer> silence_buffers;  // 累积的静音缓冲区（用于短静音保留策略）
     
     std::atomic<bool> running{false}; // 运行状态
     std::thread processing_thread;    // 处理线程

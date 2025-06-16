@@ -4,20 +4,20 @@
 
 
 AudioPreprocessor::AudioPreprocessor() 
-    : use_pre_emphasis(false)          // 默认启用预加重
+    : use_pre_emphasis(true)          // 默认启用预加重
     , pre_emphasis_coef(0.97f)        // 预加重系数
     , use_high_pass(false)            // 默认禁用高通滤波
     , high_pass_cutoff(80.0f)         // 高通滤波截止频率
-    , use_agc(false)                  // 默认禁用AGC
+    , use_agc(true)                  // 默认禁用AGC
     , target_level(0.1f)              // AGC目标电平
     , max_gain(10.0f)                 // AGC最大增益
     , min_gain(0.1f)                  // AGC最小增益
-    , use_compression(false)          // 默认禁用压缩
+    , use_compression(true)          // 默认禁用压缩
     , compression_threshold(0.5f)     // 压缩阈值
-    , compression_ratio(3.0f)         // 压缩比
+    , compression_ratio(2.0f)         // 压缩比
     , use_noise_suppression(false)    // 默认禁用噪声抑制
-    , use_final_gain(true)             // 默认启用整体音量放大
-    , final_gain_factor(1.5f)          // 默认放大1.5倍
+    , use_final_gain(false)             // 默认启用整体音量放大
+    , final_gain_factor(1.7f)          // 默认放大1.5倍
     , attack_time(0.01f)              // AGC攻击时间
     , release_time(0.1f)              // AGC释放时间
     , current_gain(1.0f)              // AGC当前增益
@@ -134,7 +134,7 @@ void AudioPreprocessor::applyNoiseSuppression(std::vector<float>& audio_buffer) 
 void AudioPreprocessor::process(std::vector<float>& audio_buffer, int sample_rate) {
     if (audio_buffer.empty()) return;
     
-    // 按照处理顺序应用各个预处理步骤
+    // 按照处理顺序应用各个预处理步骤 
     if (use_pre_emphasis) {
         applyPreEmphasis(audio_buffer, pre_emphasis_coef);
     }

@@ -1673,7 +1673,6 @@ void AudioProcessor::startProcessing() {
                 if (gui) {
                     logMessage(gui, "Video processing started with extracted audio: " + temp_wav_path);
                 } 
-                
                                         // 使用串行分配器设置视频组件
                     if (video_widget && media_player) {
                         LOG_INFO("准备通过串行分配器设置视频流播放组件");
@@ -2740,8 +2739,8 @@ void AudioProcessor::setUseGPU(bool enable) {
                     model_path = fast_recognizer->getModelPath();
                     fast_recognizer.reset();
             fast_recognizer = createFastRecognizerSafely(
-                        model_path, 
-                        nullptr, 
+                        model_path,
+                        nullptr,
                 current_language,
                 use_gpu,
                         voice_detector ? voice_detector->getThreshold() : 0.5f
@@ -3684,8 +3683,8 @@ void AudioProcessor::setRealtimeMode(bool enable) {
 
 // 初始化实时分段处理器的辅助方法
 void AudioProcessor::initializeRealtimeSegments() {
-    // 创建实时分段处理器
-    std::string temp_dir = getTemporaryDirectory("segments");
+    // 创建实时分段处理器 - 统一使用主要临时目录，不创建子目录
+    std::string temp_dir = getTemporaryDirectory(""); // 不创建子目录，直接使用主要临时目录
     
     // 确保重叠参数始终为0，防止出现重复字
     segment_overlap_ms = 0;
@@ -3698,7 +3697,7 @@ void AudioProcessor::initializeRealtimeSegments() {
     segment_handler = std::make_unique<RealtimeSegmentHandler>(
         max_segment_size_ms,  // 最大段大小，实际分段基于VAD
         0,  // 强制使用0重叠，无视segment_overlap_ms的值
-        temp_dir,
+        temp_dir,  // 使用统一的临时目录
         [this](const AudioSegment& segment) {
             this->onSegmentReady(segment);
         },
@@ -3725,7 +3724,7 @@ void AudioProcessor::initializeRealtimeSegments() {
         LOG_INFO("重叠=0ms (禁用重叠以避免重复字)");
         LOG_INFO("即时处理模式：禁用，使用稳定的批量处理");
         LOG_INFO("智能分段模式：基于WebRTC VAD进行语音活动检测");
-        LOG_INFO("临时文件目录: " + temp_dir);
+        LOG_INFO("统一临时文件目录: " + temp_dir + " (与其他临时文件共享目录)");
     }
 }
 
@@ -3834,8 +3833,11 @@ void AudioProcessor::processCurrentSegment(const std::vector<AudioBuffer>& segme
             std::mt19937 gen(rd_device()); // 标准的mersenne_twister_engine
             std::uniform_int_distribution<> dis(1000, 9999);
             
+            // 使用与getTempAudioPath相同的命名方式，确保文件路径一致
+            QString timestamp = QString::number(QDateTime::currentMSecsSinceEpoch());
             std::string temp_file_name = "segment_" + 
                                        std::to_string(segment_num) + "_" + 
+                                       timestamp.toStdString() + "_" +
                                        std::to_string(dis(gen)) + ".wav";
             std::string temp_file_path = temp_dir + "/" + temp_file_name;
             
