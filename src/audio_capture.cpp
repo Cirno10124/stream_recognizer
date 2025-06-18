@@ -112,26 +112,36 @@ void AudioCapture::processAudioInThread(void* stream, int frames_per_buffer, int
         
         AudioBuffer audio_buffer;
         audio_buffer.data = buffer;
-        queue->push(audio_buffer);
+        audio_buffer.sample_rate = sample_rate;
+        audio_buffer.channels = 1;
+        audio_buffer.timestamp = std::chrono::system_clock::now();
         
-        // 如果启用了分段，将数据也发送到分段处理器
+        // TODO: 这里可以添加VAD检测，为麦克风音频设置is_silence和voice_end标志
+        
+        // 根据是否启用分段选择单一处理路径，避免重复处理
         if (segmentation_enabled && segment_handler) {
+            // 启用分段时，只发送到分段处理器
             segment_handler->addBuffer(audio_buffer);
+        } else {
+            // 未启用分段时，发送到音频队列
+            queue->push(audio_buffer);
         }
         
         // 添加短暂延迟，避免CPU占用过高
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     
-    // 处理结束，发送终止标记
+    // 处理结束，发送终止标记（根据分段状态选择单一路径）
     if (running) {
         AudioBuffer last_buffer;
         last_buffer.is_last = true;
-        queue->push(last_buffer);
         
-        // 如果启用了分段，也发送终止标记
         if (segmentation_enabled && segment_handler) {
+            // 启用分段时，只发送到分段处理器
             segment_handler->addBuffer(last_buffer);
+        } else {
+            // 未启用分段时，发送到音频队列
+            queue->push(last_buffer);
         }
     }
     

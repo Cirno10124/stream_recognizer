@@ -300,6 +300,9 @@ public:
     // 获取分段处理器引用
     RealtimeSegmentHandler* getSegmentHandler() { return segment_handler.get(); }
     
+    // 获取实时分段启用状态
+    bool isRealtimeSegmentsEnabled() const { return use_realtime_segments; }
+    
     // 强制处理待处理的音频数据
     void processPendingAudioData();
     

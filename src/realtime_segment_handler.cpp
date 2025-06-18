@@ -31,7 +31,7 @@ RealtimeSegmentHandler::RealtimeSegmentHandler(
 {
     // 默认使用56000样本（3.5秒）作为目标段大小，如果用户指定了其他值则使用用户值
     if (segment_size_ms == 3500) { // 检查是否使用了新的默认值
-        segment_size_samples = 56000; // 设置为56000样本，约3.5秒
+        segment_size_samples = 240000; // 设置为15s
         LOG_INFO("Using optimized segment size: 56000 samples (3.5 seconds)");
     }
     
@@ -43,7 +43,7 @@ RealtimeSegmentHandler::RealtimeSegmentHandler(
     last_buffer_time = processing_start_time;
     last_segment_time = processing_start_time;
     
-    LOG_INFO("强制分段定时器已初始化，将在10秒后开始生效");
+    LOG_INFO("强制分段定时器已初始化，将在15秒后开始生效");
     
     // 初始化处理控制变量
     processing_paused = false;
@@ -217,10 +217,41 @@ void RealtimeSegmentHandler::addBuffer(const AudioBuffer& buffer) {
 
 // 新增方法：直接处理缓冲区
 void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
+    // 添加互斥锁保护，确保线程安全，避免乱序和重复生成
+    static std::mutex process_mutex;
+    std::lock_guard<std::mutex> lock(process_mutex);
+    
+    // 创建处理后的缓冲区副本
+    AudioBuffer processed_buffer = buffer;
+    
+    // 应用音频预处理（如果有预处理器）
+    if (audio_preprocessor && !buffer.data.empty()) {
+        processed_buffer.data = buffer.data; // 复制原始数据
+        audio_preprocessor->process(processed_buffer.data, buffer.sample_rate);
+        LOG_INFO("应用音频预处理，样本数: " + std::to_string(processed_buffer.data.size()));
+    }
+    
+    // 应用VAD检测（如果有VAD检测器且不是最后缓冲区）
+    if (voice_detector && !buffer.is_last && !buffer.data.empty()) {
+        bool has_voice = voice_detector->detect(processed_buffer.data, buffer.sample_rate);
+        
+        // 更新缓冲区的静音状态
+        processed_buffer.is_silence = !has_voice;
+        
+        // 检查语音结束检测
+        if (voice_detector->hasVoiceEndedDetected()) {
+            processed_buffer.voice_end = true;
+            LOG_INFO("🎯 VAD检测到语音结束，标记语音段结束");
+        }
+        
+        LOG_INFO("VAD检测结果: " + std::string(has_voice ? "有语音" : "静音") + 
+                ", 语音结束: " + std::string(processed_buffer.voice_end ? "是" : "否"));
+    }
+    
     // 检查是否需要生成段
     bool should_create_segment = false;
     
-    if (buffer.is_last) {
+    if (processed_buffer.is_last) {
         // 最后一个缓冲区，强制生成段
         should_create_segment = true;
         LOG_INFO("收到最后缓冲区，生成最终段");
@@ -238,15 +269,15 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         
         // 即使当前缓冲区是空的，也要添加到current_buffers以确保处理
         // 但只有在数据不为空时才添加样本数
-        if (!buffer.data.empty()) {
-            current_buffers.push_back(buffer);
-            total_samples += buffer.data.size();
+        if (!processed_buffer.data.empty()) {
+            current_buffers.push_back(processed_buffer);
+            total_samples += processed_buffer.data.size();
         } else {
             LOG_INFO("最后缓冲区为空，但仍会强制处理之前积累的音频数据");
         }
-    } else if (buffer.is_silence) {
+    } else if (processed_buffer.is_silence) {
         // 静音缓冲区：应用短静音保留策略
-        silence_buffers.push_back(buffer);
+        silence_buffers.push_back(processed_buffer);
         
         // 计算累积的静音时长
         size_t total_silence_samples = 0;
@@ -304,34 +335,28 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         }
         
         // 非最后缓冲区，正常添加到当前缓冲区
-        current_buffers.push_back(buffer);
-        total_samples += buffer.data.size();
+        current_buffers.push_back(processed_buffer);
+        total_samples += processed_buffer.data.size();
         
-        if (buffer.voice_end) {
+        if (processed_buffer.voice_end) {
             // 检测到语音结束，生成段
             should_create_segment = true;
-            LOG_INFO("检测到语音结束，生成段");
-        } else if (total_samples >= segment_size_samples) {
+            LOG_INFO("🎯 VAD智能分段：检测到语音结束，触发分段！总样本数: " + std::to_string(total_samples));
+        } else if (false) {
             // 达到段大小限制，生成段
             should_create_segment = true;
-            LOG_INFO("达到段大小限制，生成段: " + std::to_string(total_samples) + " 样本");
+            LOG_INFO("⚠️  强制分段：达到段大小限制，生成段: " + std::to_string(total_samples) + " 样本");
         } else {
-            // 检查是否需要基于时间的强制分段（减少到5秒以实现更频繁的分段）
+            // 检查是否需要基于时间的强制分段（只使用15秒绝对超时，移除8秒机制）
             auto current_time = std::chrono::steady_clock::now();
             auto time_since_last_segment = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_segment_time);
-            const int force_segment_timeout_ms = 5000; // 5秒强制分段，确保实时性
+            const int force_segment_timeout_ms = 15000; // 15秒强制分段，避免打断长句话
             
             if (time_since_last_segment.count() >= force_segment_timeout_ms && !current_buffers.empty()) {
                 should_create_segment = true;
-                LOG_INFO("5秒定时器触发强制分段（分段处理器）: " + std::to_string(total_samples) + " 样本");
-            } else if (total_samples >= segment_size_samples * 0.5) {
-                // 如果达到目标段大小的50%，也考虑基于时间分段
-                const int half_timeout_ms = 2500; // 2.5秒
-                if (time_since_last_segment.count() >= half_timeout_ms) {
-                    should_create_segment = true;
-                    LOG_INFO("2.5秒定时器+50%段大小触发强制分段: " + std::to_string(total_samples) + " 样本");
-                }
+                 LOG_INFO("⏰ 强制分段：15秒定时器触发（分段处理器）: " + std::to_string(total_samples) + " 样本");
             }
+            // 移除8秒+80%段大小的强制分段机制，避免打断长句子
         }
     }
     
@@ -341,7 +366,7 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
                 ", 总样本数: " + std::to_string(total_samples));
         
         // 添加音频段末尾缓冲：为了避免截断最后几个字，添加短暂的静音
-        if (buffer.voice_end || buffer.is_last) {
+        if (processed_buffer.voice_end || processed_buffer.is_last) {
             // 在语音段结束时添加200ms的缓冲时间
             size_t buffer_samples = 16000 * 0.2; // 200ms @ 16kHz
             AudioBuffer padding_buffer;
@@ -351,7 +376,7 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
             padding_buffer.timestamp = std::chrono::system_clock::now();
             padding_buffer.is_silence = true;
             padding_buffer.voice_end = false;
-            padding_buffer.is_last = buffer.is_last;
+            padding_buffer.is_last = processed_buffer.is_last;
             
             current_buffers.push_back(padding_buffer);
             total_samples += buffer_samples;
@@ -366,7 +391,7 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
             AudioSegment segment;
             segment.filepath = segment_path;
             segment.timestamp = std::chrono::system_clock::now();
-            segment.is_last = buffer.is_last;
+            segment.is_last = processed_buffer.is_last;
             
             LOG_INFO("音频段已创建: " + segment_path + 
                     ", 是否为最后段: " + (segment.is_last ? "是" : "否"));
@@ -385,7 +410,7 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
         
         // 更新最后分段时间
         last_segment_time = std::chrono::steady_clock::now();
-    } else if (buffer.is_last && current_buffers.empty()) {
+    } else if (processed_buffer.is_last && current_buffers.empty()) {
         // 特殊情况：最后缓冲区但没有积累的数据
         LOG_INFO("收到最后缓冲区但没有积累的音频数据，仍会触发最后段处理回调");
         
@@ -406,6 +431,10 @@ void RealtimeSegmentHandler::flushCurrentSegment() {
     if (!running) {
         return;
     }
+    
+    // 使用与processBufferDirectly相同的互斥锁，确保线程安全
+    static std::mutex process_mutex;
+    std::lock_guard<std::mutex> lock(process_mutex);
     
     LOG_INFO("手动触发当前语音段的处理");
     
@@ -455,24 +484,26 @@ void RealtimeSegmentHandler::flushCurrentSegment() {
     }
     
     // 备用检查：也检查活跃缓冲区（多线程模式兼容性）
-    std::lock_guard<std::mutex> lock(pool_mutex);
-    bool marked = false;
-    
-    // 遍历所有活跃缓冲区
-    for (auto* buffer : active_buffers) {
-        if (!buffer->empty()) {
-            // 将最后一个缓冲区标记为"最后"
-            buffer->back().is_last = true;
-            marked = true;
-            
-            LOG_INFO("已标记活跃缓冲区的最后一个缓冲区为'最后'，准备立即处理");
+    {
+        std::lock_guard<std::mutex> pool_lock(pool_mutex);
+        bool marked = false;
+        
+        // 遍历所有活跃缓冲区
+        for (auto* buffer : active_buffers) {
+            if (!buffer->empty()) {
+                // 将最后一个缓冲区标记为"最后"
+                buffer->back().is_last = true;
+                marked = true;
+                
+                LOG_INFO("已标记活跃缓冲区的最后一个缓冲区为'最后'，准备立即处理");
+            }
         }
-    }
-    
-    if (marked) {
-        // 通知处理线程
-        pool_cv.notify_all();
-        LOG_INFO("已通知处理线程处理标记的缓冲区");
+        
+        if (marked) {
+            // 通知处理线程
+            pool_cv.notify_all();
+            LOG_INFO("已通知处理线程处理标记的缓冲区");
+        }
     }
 }
 
@@ -1016,7 +1047,18 @@ void RealtimeSegmentHandler::setSegmentSize(size_t segment_size_ms, size_t overl
 // 实现设置重叠处理的方法
 void RealtimeSegmentHandler::setUseOverlapProcessing(bool enable) {
     use_overlap_processing = enable;
-    LOG_INFO("语音段间重叠处理 " + std::string(enable ? "启用" : "禁用") + 
-            " - " + (enable ? "将处理语音段之间的连接区域" : "仅处理单个语音段"));
+    LOG_INFO("重叠段处理模式: " + std::string(enable ? "启用" : "禁用"));
+}
+
+// 设置音频预处理器
+void RealtimeSegmentHandler::setAudioPreprocessor(AudioPreprocessor* preprocessor) {
+    audio_preprocessor = preprocessor;
+    LOG_INFO("音频预处理器已设置: " + std::string(preprocessor ? "启用" : "禁用"));
+}
+
+// 设置VAD检测器
+void RealtimeSegmentHandler::setVoiceActivityDetector(VoiceActivityDetector* detector) {
+    voice_detector = detector;
+    LOG_INFO("VAD检测器已设置: " + std::string(detector ? "启用" : "禁用"));
 }
 

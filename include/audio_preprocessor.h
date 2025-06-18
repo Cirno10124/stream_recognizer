@@ -2,7 +2,10 @@
 
 #include <iostream>
 #include <vector>
-#include <qmath.h>
+#include <cmath>
+
+// 前向声明RNNoise结构体
+struct DenoiseState;
 
 class AudioPreprocessor {
 public:
@@ -19,9 +22,22 @@ public:
     void applyNoiseSuppression(std::vector<float>& audio_buffer);
     void applyCompression(std::vector<float>& audio_buffer);
 
+    // 噪声抑制库管理
+    bool initializeNoiseSuppressor();
+    void destroyNoiseSuppressor();
+    bool isNoiseSuppressionAvailable() const;
+    
+    // 获取噪声抑制器指针（供外部直接调用）
+    void* getNoiseSuppressor() const { return noise_suppressor; }
+
     // 兼容性函数 - 保持与旧代码兼容
     void setUsePreEmphasis(bool enable) { use_pre_emphasis = enable; }
-    void setUseNoiseSuppression(bool enable) { use_noise_suppression = enable; }
+    void setUseNoiseSuppression(bool enable) { 
+        use_noise_suppression = enable; 
+        if (enable && !noise_suppressor) {
+            initializeNoiseSuppressor();
+        }
+    }
     void setAGCParameters(float target, float min, float max, 
                          float threshold, float ratio,
                          float attack, float release) {
@@ -63,6 +79,12 @@ public:
 
     // 噪声抑制开关
     bool use_noise_suppression; // 手动设置
+    
+    // 🔧 新增：噪声抑制强度控制参数
+    float noise_suppression_strength; // 噪声抑制强度（0.0-1.0，0.0=关闭，1.0=最强）
+    float noise_suppression_mix_ratio; // 原始音频与处理音频的混合比例（0.0=全处理，1.0=全原始）
+    bool use_adaptive_suppression; // 自适应抑制（根据信号强度调整）
+    float vad_energy_threshold; // VAD能量阈值，低于此值认为是静音
 
     // 整体音量放大功能
     bool use_final_gain; // 整体音量放大开关，手动设置
@@ -75,9 +97,38 @@ public:
 
     // 滤波器状态
     float hp_filter_state[2];
-    // 噪声抑制器指针
+    // 噪声抑制器指针（RNNoise DenoiseState*）
     void* noise_suppressor;
 
+    // 🔧 新增：噪声抑制参数设置函数
+    void setNoiseSuppressionParameters(float strength, float mix_ratio, bool adaptive = false) {
+        noise_suppression_strength = std::max(0.0f, std::min(1.0f, strength));
+        noise_suppression_mix_ratio = std::max(0.0f, std::min(1.0f, mix_ratio));
+        use_adaptive_suppression = adaptive;
+    }
+    void setVADEnergyThreshold(float threshold) {
+        vad_energy_threshold = threshold;
+    }
+
 private:
-    // 私有辅助函数可以在这里添加
+    // 私有辅助函数
+    void convertFloatToPCM16(const std::vector<float>& float_buffer, std::vector<short>& pcm_buffer);
+    void convertPCM16ToFloat(const std::vector<short>& pcm_buffer, std::vector<float>& float_buffer);
+    
+    // RNNoise 16kHz适配处理方法
+    void processWithNative16k(std::vector<float>& audio_buffer, void* state, size_t frame_size);
+    void processWithAdapted48k(std::vector<float>& audio_buffer, void* state);
+    void processWithHighQualityResampling(std::vector<float>& audio_buffer, void* state);
+    void processWithSimpleMethod(std::vector<float>& audio_buffer, void* state);
+    
+    // 辅助函数
+    float calculateRMS(const std::vector<float>& buffer);
+    std::vector<float> upsampleLanczos(const std::vector<float>& input, int orig_sr, int target_sr);
+    std::vector<float> downsampleLanczos(const std::vector<float>& input, int orig_sr, int target_sr);
+    
+    // 🔧 新增：改进的噪声抑制处理方法
+    void applyAdaptiveNoiseSuppression(std::vector<float>& audio_buffer, const std::vector<float>& original_buffer);
+    void mixAudioBuffers(std::vector<float>& processed, const std::vector<float>& original, float mix_ratio);
+    float calculateSignalToNoiseRatio(const std::vector<float>& buffer);
+    bool isSignalBelowVADThreshold(const std::vector<float>& buffer);
 }; 

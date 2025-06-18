@@ -435,23 +435,24 @@ AudioProcessor::~AudioProcessor() {
             
                 LOG_INFO("Network manager cleaned up safely");
             } else {
-                // 延迟清理网络管理器，直到所有请求完成
-                LOG_INFO("Network manager cleanup delayed due to active requests");
+                // 强制清理网络管理器，不再延迟等待
+                LOG_INFO("Network manager cleanup forced due to active requests");
                 
-                // 创建一个定时器来延迟清理
-                QTimer::singleShot(10000, this, [this]() {
-                    if (precise_network_manager) {
-                        LOG_INFO("Delayed network manager cleanup executing");
-                        
-                        precise_network_manager->clearAccessCache();
-                        precise_network_manager->clearConnectionCache();
-                        disconnect(precise_network_manager, nullptr, this, nullptr);
-                        precise_network_manager->deleteLater();
-                        precise_network_manager = nullptr;
-                        
-                        LOG_INFO("Delayed network manager cleanup completed");
-                    }
-                });
+                // 强制取消所有活跃请求
+                {
+                    std::lock_guard<std::mutex> lock(active_requests_mutex);
+                    active_requests.clear();
+                    LOG_INFO("Forced cleanup of all active requests");
+                }
+                
+                // 立即清理网络管理器
+                precise_network_manager->clearAccessCache();
+                precise_network_manager->clearConnectionCache();
+                disconnect(precise_network_manager, nullptr, this, nullptr);
+                precise_network_manager->deleteLater();
+                precise_network_manager = nullptr;
+                
+                LOG_INFO("Network manager cleanup completed immediately");
             }
         }
 
@@ -1517,7 +1518,24 @@ void AudioProcessor::startProcessing() {
         LOG_INFO("Starting audio processing in mode: " + std::to_string(static_cast<int>(current_recognition_mode)));
         LOG_INFO("Current input mode: " + std::to_string(static_cast<int>(current_input_mode)));
         
-        // 步骤7: 根据输入模式串行启动相应的输入源
+        // 步骤7: 根据输入模式和Fast Mode设置决定是否启用实时分段
+        bool should_use_realtime_segments = true; // 默认启用实时分段
+        
+        // 只有文件输入模式且勾选了Fast Mode时才禁用实时分段
+        if ((current_input_mode == InputMode::AUDIO_FILE || current_input_mode == InputMode::VIDEO_FILE) && fast_mode) {
+            should_use_realtime_segments = false;
+            LOG_INFO("文件输入 + Fast Mode：禁用实时分段，使用传统批量处理");
+        } else {
+            LOG_INFO("启用实时分段模式：" + 
+                    std::string((current_input_mode == InputMode::AUDIO_FILE || current_input_mode == InputMode::VIDEO_FILE) ? 
+                               "文件输入但未勾选Fast Mode" : 
+                               (current_input_mode == InputMode::MICROPHONE ? "麦克风输入" : "流输入")));
+        }
+        
+        // 更新实时分段设置
+        use_realtime_segments = should_use_realtime_segments;
+        
+        // 步骤8: 根据输入模式串行启动相应的输入源
         switch (current_input_mode) {
             case InputMode::MICROPHONE:
                 {
@@ -1535,34 +1553,20 @@ void AudioProcessor::startProcessing() {
                     LOG_INFO("Reusing existing audio capture instance");
                 }
                 
-                // 设置麦克风分段功能
-                if (use_realtime_segments && 
-                    (current_recognition_mode == RecognitionMode::OPENAI_RECOGNITION ||
-                     current_recognition_mode == RecognitionMode::PRECISE_RECOGNITION)) {
-                    audio_capture->enableRealtimeSegmentation(true, segment_size_ms, segment_overlap_ms);
-                    audio_capture->setSegmentCallback([this](const std::string& filepath) {
-                        // 处理麦克风捕获的音频段
-                        if (gui) {
-                            gui->appendLogMessage("Processing captured audio segment: " + QString::fromStdString(filepath));
-                        }
-                        
-                        // 根据识别模式处理段
-                        if (current_recognition_mode == RecognitionMode::OPENAI_RECOGNITION) {
-                        // 调用OpenAI API处理
-                        processWithOpenAI(filepath);
-                        } else if (current_recognition_mode == RecognitionMode::PRECISE_RECOGNITION) {
-                            // 发送到精确识别服务
-                            RecognitionParams params;
-                            params.language = current_language;
-                            params.use_gpu = use_gpu;
-                            sendToPreciseServer(filepath, params);
-                        }
-                    });
+                // 为麦克风启用实时分段处理（根据统一逻辑决定）
+                if (use_realtime_segments) {
+                    // 初始化实时分段处理器 - 麦克风始终使用实时分段
+                    initializeRealtimeSegments();
                     
                     if (gui) {
-                        logMessage(gui, std::string("Realtime segmentation processor started: segment size=") +
-                            std::to_string(segment_size_ms) + "ms, overlap=" +
-                            std::to_string(segment_overlap_ms) + "ms");
+                        logMessage(gui, "麦克风输入启用基于VAD的智能分段处理：段大小=" + 
+                                  std::to_string(segment_size_ms) + "ms");
+                    }
+                } else {
+                    // 这种情况理论上不应该发生，因为麦克风模式应该始终启用实时分段
+                    LOG_WARNING("麦克风模式未启用实时分段，这可能不是预期行为");
+                    if (gui) {
+                        logMessage(gui, "警告：麦克风模式未启用实时分段");
                     }
                 }
                 
@@ -1600,7 +1604,7 @@ void AudioProcessor::startProcessing() {
                     LOG_INFO("Reusing existing file input instance");
                 }
                 
-                // 为文件输入启用实时分段处理（如果需要）
+                // 为文件输入启用实时分段处理（根据Fast Mode设置决定）
                 if (use_realtime_segments) {
                     // 初始化实时分段处理器 - 所有识别模式都使用分段
                     initializeRealtimeSegments();
@@ -1608,6 +1612,10 @@ void AudioProcessor::startProcessing() {
                     if (gui) {
                         logMessage(gui, "文件输入启用基于VAD的智能分段处理：段大小=" + 
                                   std::to_string(segment_size_ms) + "ms");
+                    }
+                } else {
+                    if (gui) {
+                        logMessage(gui, "文件输入使用Fast Mode：禁用实时分段，采用传统批量处理");
                     }
                 }
                 
@@ -1649,7 +1657,7 @@ void AudioProcessor::startProcessing() {
                     LOG_INFO("Reusing existing file input instance for video audio");
                 }
                 
-                // 为视频文件输入启用实时分段处理（如果需要）
+                // 为视频文件输入启用实时分段处理（根据Fast Mode设置决定）
                 if (use_realtime_segments) {
                     // 初始化实时分段处理器 - 所有识别模式都使用分段
                     initializeRealtimeSegments();
@@ -1657,6 +1665,10 @@ void AudioProcessor::startProcessing() {
                     if (gui) {
                         logMessage(gui, "视频文件输入启用基于VAD的智能分段处理：段大小=" + 
                                   std::to_string(segment_size_ms) + "ms");
+                    }
+                } else {
+                    if (gui) {
+                        logMessage(gui, "视频文件输入使用Fast Mode：禁用实时分段，采用传统批量处理");
                     }
                 }
                 
@@ -1791,11 +1803,7 @@ void AudioProcessor::startProcessing() {
                         LOG_INFO("Reusing existing stream input instance");
                     }
                     
-                    // 为视频流强制启用实时分段处理（流音频必须使用分段）
-                    if (!use_realtime_segments) {
-                        LOG_INFO("Video stream mode requires realtime segmentation, enabling it automatically");
-                        use_realtime_segments = true;
-                    }
+                    // 视频流模式的实时分段已在步骤7中统一设置
                     
                     initializeRealtimeSegments();
                     
@@ -3278,22 +3286,30 @@ void AudioProcessor::openAIResultReady(const QString& result) {
     // 记录该方法被调用
     std::cout << "[INFO] AudioProcessor::openAIResultReady 被调用，结果长度: " << result.length() << " 字符" << std::endl;
     
-    
-    // 使用安全推送方法，防止重复推送
-    if (safePushToGUI(result, "openai", "OpenAI_Direct")) {
-        std::cout << "[INFO] OpenAI结果已成功推送到GUI" << std::endl;
+    // 检查是否启用了输出矫正
+    if (output_correction_enabled && output_corrector) {
+        LOG_INFO("OpenAI结果将通过矫正服务处理");
         
-        // 如果启用了字幕，也添加到字幕系统
-        if (gui && gui->isSubtitlesEnabled()) {
-            qint64 timestamp = gui->getCurrentMediaPosition();
-            std::cout << "[INFO] 添加字幕，时间戳: " << timestamp << std::endl;
-            QMetaObject::invokeMethod(gui, "onOpenAISubtitleReady", 
-                                     Qt::QueuedConnection,
-                                     Q_ARG(QString, result),
-                                     Q_ARG(qint64, timestamp));
-        }
+        // 异步进行矫正处理
+        enqueueCorrectionTask(result, "OpenAI_Direct", "openai");
     } else {
-        std::cout << "[INFO] OpenAI结果未推送（可能是重复或失败）" << std::endl;
+        // 直接输出，不经过矫正
+        // 使用安全推送方法，防止重复推送
+        if (safePushToGUI(result, "openai", "OpenAI_Direct")) {
+            std::cout << "[INFO] OpenAI结果已成功推送到GUI" << std::endl;
+            
+            // 如果启用了字幕，也添加到字幕系统
+            if (gui && gui->isSubtitlesEnabled()) {
+                qint64 timestamp = gui->getCurrentMediaPosition();
+                std::cout << "[INFO] 添加字幕，时间戳: " << timestamp << std::endl;
+                QMetaObject::invokeMethod(gui, "onOpenAISubtitleReady", 
+                                         Qt::QueuedConnection,
+                                         Q_ARG(QString, result),
+                                         Q_ARG(qint64, timestamp));
+            }
+        } else {
+            std::cout << "[INFO] OpenAI结果未推送（可能是重复或失败）" << std::endl;
+        }
     }
     
     // 不再发送信号
@@ -3480,10 +3496,10 @@ void AudioProcessor::processBufferForMicrophone(const AudioBuffer& buffer) {
                         break;
             }
             
-            // 将处理后的音频数据添加到队列
-    if (audio_queue) {
-            audio_queue->push(processed_buffer);
-    }
+            // 只有在未启用实时分段时才添加到队列，避免重复处理
+            if (!use_realtime_segments && audio_queue) {
+                audio_queue->push(processed_buffer);
+            }
 }
 
 void AudioProcessor::processBufferForFile(const AudioBuffer& buffer) {
@@ -3567,25 +3583,40 @@ void AudioProcessor::processBufferForFile(const AudioBuffer& buffer) {
     
     // 如果启用了实时分段，将音频数据发送到分段处理器
     if (use_realtime_segments && segment_handler) {
-        // 基于原始音频进行VAD检测
+        // 基于原始音频进行VAD检测（修正参数以符合实际停顿时间）
         static int file_voice_detection_counter = 0;
         static int file_consecutive_silence_frames = 0;
-        const int file_silence_threshold_frames = 30;  // 需要30个连续静音帧才认为语音结束(约0.6秒)
+        const int file_silence_threshold_frames = 4;  // 4帧约0.6秒静音触发（每缓冲区检测，4×30ms×1=120ms×4=480ms）
         
-        if (voice_detector && ++file_voice_detection_counter % 10 == 0) {  // 每10个缓冲区检测一次，减少检测频率
+        if (voice_detector && ++file_voice_detection_counter % 1 == 0) {  // 每个缓冲区都检测，提高响应速度
             bool has_voice = voice_detector->detect(buffer.data, SAMPLE_RATE);  // 使用原始音频检测
+            
+            // 设置is_silence标志，RealtimeSegmentHandler需要这个
+            processed_buffer.is_silence = !has_voice;
             
             if (!has_voice) {
                 file_consecutive_silence_frames++;
-    } else {
-                file_consecutive_silence_frames = 0;  // 重置静音计数
+            } else {
+                if (file_consecutive_silence_frames != 0) {
+                    file_consecutive_silence_frames = 0;  // 重置静音计数
+                }
+               
             }
             
             // 只有在连续静音超过阈值时才标记语音结束
             if (file_consecutive_silence_frames >= file_silence_threshold_frames) {
                 processed_buffer.voice_end = true;
                 file_consecutive_silence_frames = 0;  // 重置计数
-                LOG_INFO("文件：检测到连续静音，标记语音段结束");
+                LOG_INFO("🎯 文件VAD智能分段：检测到" + std::to_string(file_silence_threshold_frames) + "帧连续静音（约" + 
+                        std::to_string(file_silence_threshold_frames * 30) + "ms），触发语音段结束");
+            }
+            
+            // 添加调试日志（每20帧输出一次）
+            if (file_voice_detection_counter % 20 == 0) {
+                LOG_INFO("文件VAD状态: 有语音=" + std::string(has_voice ? "是" : "否") + 
+                        ", 连续静音帧=" + std::to_string(file_consecutive_silence_frames) + 
+                        ", 语音结束=" + std::string(processed_buffer.voice_end ? "是" : "否") + 
+                        " (每帧" + std::to_string(30) + "ms)");
             }
         }
         
@@ -3656,11 +3687,16 @@ void AudioProcessor::processBufferForFile(const AudioBuffer& buffer) {
         current_batch.clear();
     }
     
-    // 添加到音频队列 - 确保队列不为空
-    if (audio_queue) {
-        audio_queue->push(processed_buffer);
+    // 只有在未启用实时分段时才添加到音频队列，避免重复处理
+    if (!use_realtime_segments) {
+        if (audio_queue) {
+            audio_queue->push(processed_buffer);
+        } else {
+            LOG_ERROR("音频队列未初始化，无法添加处理后的缓冲区");
+        }
     } else {
-        LOG_ERROR("音频队列未初始化，无法添加处理后的缓冲区");
+        // 使用实时分段时，音频已经通过segment_handler处理，不需要重复添加到队列
+        LOG_DEBUG("实时分段模式：跳过向audio_queue添加数据，避免重复处理");
     }
 }
 
@@ -3712,6 +3748,20 @@ void AudioProcessor::initializeRealtimeSegments() {
     
     // 设置OpenAI模式（如果需要）
     segment_handler->setOpenAIMode(use_openai);
+    
+    // 显式禁用重叠处理，避免重复处理音频
+    segment_handler->setUseOverlapProcessing(false);
+    
+    // 设置音频预处理器和VAD检测器
+    if (audio_preprocessor) {
+        segment_handler->setAudioPreprocessor(audio_preprocessor.get());
+        LOG_INFO("已为实时分段处理器设置音频预处理器");
+    }
+    
+    if (voice_detector) {
+        segment_handler->setVoiceActivityDetector(voice_detector.get());
+        LOG_INFO("已为实时分段处理器设置VAD检测器");
+    }
     
     // 启动分段处理器
     if (!segment_handler->start()) {
@@ -4428,6 +4478,28 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
         
         // 连接超时处理 - 使用安全的指针检查和重试逻辑，对最后段的请求延长超时时间
         connect(timeoutTimer, &QTimer::timeout, this, [this, safeReply, request_id, safeTimer]() {
+            // 检查处理状态，如果处理已经停止，不延长超时
+            if (!is_processing) {
+                LOG_INFO("Request " + std::to_string(request_id) + " timeout after processing stopped, canceling request");
+                
+                // 清理活动请求
+                {
+                    std::lock_guard<std::mutex> lock(active_requests_mutex);
+                    active_requests.erase(request_id);
+                }
+                
+                // 取消请求
+                if (safeReply && !safeReply.isNull()) {
+                    safeReply->abort();
+                }
+                
+                // 清理定时器
+                if (safeTimer && !safeTimer.isNull()) {
+                    safeTimer->deleteLater();
+                }
+                return;
+            }
+            
             // 检查是否正在进行最终段处理
             bool is_final_segment_processing = false;
             {
@@ -4436,13 +4508,13 @@ bool AudioProcessor::sendToPreciseServer(const std::string& audio_file_path,
                 is_final_segment_processing = (active_requests.size() <= 2);
             }
             
-            if (is_final_segment_processing) {
+            if (is_final_segment_processing && is_processing) {
                 LOG_WARNING("Request " + std::to_string(request_id) + " timeout during final segment processing, extending timeout");
                 
                 // 对于最终段处理期间的请求，延长超时时间
                 if (safeTimer && !safeTimer.isNull()) {
-                    safeTimer->start(60000); // 延长到60秒
-                    LOG_INFO("Extended timeout for final segment request " + std::to_string(request_id) + " to 60 seconds");
+                    safeTimer->start(30000); // 减少延长时间到30秒
+                    LOG_INFO("Extended timeout for final segment request " + std::to_string(request_id) + " to 30 seconds");
                     return; // 延长超时，不终止请求
                 }
             }
@@ -4866,21 +4938,20 @@ void AudioProcessor::preciseResultReceived(int request_id, const QString& result
         
         LOG_INFO("准备推送精确识别服务器结果到GUI...");
         
-        // 直接推送到GUI，避免调用可能阻塞的safePushToGUI
-        // 因为精确识别结果不需要矫正，直接更新GUI即可
-        try {
-            LOG_INFO("直接调用GUI更新方法...");
-            bool gui_update_success = QMetaObject::invokeMethod(gui, "appendFinalOutput", 
-                                                                Qt::QueuedConnection, 
-                                                                Q_ARG(QString, result));
+        // 检查是否启用了输出矫正
+        if (output_correction_enabled && output_corrector) {
+            LOG_INFO("精确识别结果将通过矫正服务处理");
             
-            if (gui_update_success) {
-                LOG_INFO("精确识别服务器结果已直接推送到GUI");
+            // 异步进行矫正处理
+            enqueueCorrectionTask(result, "Precise_Recognition", "precise");
         } else {
-                LOG_WARNING("GUI更新方法调用失败");
+            // 直接输出，不经过矫正
+            // 使用安全推送方法，防止重复推送
+            if (safePushToGUI(result, "precise", "Precise_Recognition")) {
+                LOG_INFO("精确识别服务器结果已成功推送到GUI");
+            } else {
+                LOG_INFO("精确识别服务器结果未推送（可能是重复或失败）");
             }
-        } catch (const std::exception& e) {
-            LOG_ERROR("直接推送到GUI时发生异常: " + std::string(e.what()));
         }
         
         // 将结果添加到结果队列，供其他组件使用
@@ -5166,9 +5237,9 @@ void AudioProcessor::stopProcessing() {
                         }
                     }
                     
-                    // 增加等待时间，特别是为了确保最后段的请求能完成，最多等待30秒
-                    const int max_wait_seconds = 30;  // 增加到30秒
-                    const int check_interval_ms = 200;  // 减少检查频率
+                    // 减少等待时间，避免无意义的长时间等待，最多等待10秒
+                    const int max_wait_seconds = 10;  // 减少到10秒
+                    const int check_interval_ms = 200;  // 保持检查频率
                     int wait_count = 0;
                     const int max_checks = (max_wait_seconds * 1000) / check_interval_ms;
                     
@@ -5275,8 +5346,8 @@ void AudioProcessor::stopProcessing() {
         
         if (has_remaining_requests) {
             LOG_INFO("Delaying processingFullyStopped signal due to remaining active requests");
-            // 延迟检查是否所有请求都完成
-            QTimer::singleShot(10000, this, [this]() {
+            // 减少延迟时间到3秒，避免无意义的长时间等待
+            QTimer::singleShot(3000, this, [this]() {
                 LOG_INFO("Delayed check: sending processingFullyStopped signal");
                 emit processingFullyStopped();
             });
@@ -5783,16 +5854,34 @@ bool AudioProcessor::safeLoadModel(const std::string& model_path, bool gpu_enabl
     }
 }
 
-// 在processAudioFrame方法中添加VAD静音检测
+// 在processAudioFrame方法中添加VAD静音检测和语音结束检测
 void AudioProcessor::processAudioFrame(const std::vector<float>& frame_data) {
     AudioBuffer buffer;
     buffer.data = frame_data;
     buffer.timestamp = std::chrono::system_clock::now();
 
-    // 使用VAD检测是否为静音段
+    // 使用VAD检测是否为静音段和语音结束
     if (voice_detector) {
         // 使用更低的阈值进行静音检测，0.7表示70%的帧为静音则认为整个缓冲区是静音
         voice_detector->process(buffer, 0.7f);
+        
+        // 更新VAD状态并检测语音结束
+        voice_detector->updateVoiceState(buffer.is_silence);
+        
+        // 检测语音是否结束，并设置voice_end标志
+        if (voice_detector->hasVoiceEndedDetected()) {
+            buffer.voice_end = true;
+            LOG_INFO("🎯 VAD检测到语音结束，将触发智能分段");
+        }
+        
+        // 添加调试日志（每50帧输出一次状态，避免日志过多）
+        static int frame_counter = 0;
+        frame_counter++;
+        if (frame_counter % 50 == 0) {
+            LOG_INFO("VAD状态: 静音=" + std::string(buffer.is_silence ? "是" : "否") + 
+                    ", 语音结束=" + std::string(buffer.voice_end ? "是" : "否") + 
+                    " (第" + std::to_string(frame_counter) + "帧)");
+        }
     }
     
     // 将缓冲区添加到分段处理器
@@ -5820,17 +5909,27 @@ void AudioProcessor::fastResultReady() {
         
         // 检查结果文本是否有效
         if (!result.text.empty()) {
-            // 使用安全推送方法，防止重复推送
             QString resultText = QString::fromStdString(result.text);
-            if (safePushToGUI(resultText, "final", "Fast_Recognition")) {
-                LOG_INFO("快速识别结果已推送到GUI：" + result.text);
             
-            // 添加字幕（如果启用）
-            if (subtitle_manager) {
-                subtitle_manager->addWhisperSubtitle(result);
-                }
+            // 检查是否启用了输出矫正
+            if (output_correction_enabled && output_corrector) {
+                LOG_INFO("快速识别结果将通过矫正服务处理：" + result.text);
+                
+                // 异步进行矫正处理
+                enqueueCorrectionTask(resultText, "Fast_Recognition", "final");
             } else {
-                LOG_INFO("快速识别结果未推送（可能是重复）：" + result.text);
+                // 直接输出，不经过矫正
+                // 使用安全推送方法，防止重复推送
+                if (safePushToGUI(resultText, "final", "Fast_Recognition")) {
+                    LOG_INFO("快速识别结果已推送到GUI：" + result.text);
+                
+                // 添加字幕（如果启用）
+                if (subtitle_manager) {
+                    subtitle_manager->addWhisperSubtitle(result);
+                    }
+                } else {
+                    LOG_INFO("快速识别结果未推送（可能是重复）：" + result.text);
+                }
             }
         }
         
@@ -6313,7 +6412,7 @@ bool AudioProcessor::safePushToGUI(const QString& result, const std::string& out
     QString corrected_result = result;
     
     // 检查是否需要异步矫正 - 但要排除精确识别的结果
-    bool is_precise_result = (source_type.find("precise") != std::string::npos);
+    bool is_precise_result = (source_type.find("Precise") != std::string::npos || output_type == "precise");
     bool needs_async_correction = output_correction_enabled && line_by_line_correction_enabled && !is_precise_result;
     
     LOG_INFO("是否为精确识别结果: " + std::string(is_precise_result ? "true" : "false"));
@@ -6372,6 +6471,11 @@ bool AudioProcessor::safePushToGUI(const QString& result, const std::string& out
                 Qt::QueuedConnection, 
                 Q_ARG(QString, corrected_result));
             LOG_INFO("成功推送最终结果到GUI: " + source_type + " - " + corrected_result.left(50).toStdString());
+        } else if (output_type == "precise") {
+            QMetaObject::invokeMethod(gui, "appendFinalOutput", 
+                Qt::QueuedConnection, 
+                Q_ARG(QString, corrected_result));
+            LOG_INFO("成功推送精确识别结果到GUI: " + source_type + " - " + corrected_result.left(50).toStdString());
         } else {
             LOG_ERROR("未知的输出类型: " + output_type);
             return false;
@@ -6740,9 +6844,14 @@ bool AudioProcessor::initializeVADSafely() {
             
             // 尝试配置VAD参数（即使初始化检查失败也要尝试）
             try {
-            voice_detector->setVADMode(3);  // 使用最敏感模式
-            voice_detector->setThreshold(vad_threshold);
-                LOG_INFO("VAD instance configuration successful");
+                voice_detector->setVADMode(3);  // 使用最敏感模式
+                voice_detector->setThreshold(vad_threshold);
+                
+                // 配置语音结束检测参数，启用VAD智能分段
+                voice_detector->setSilenceDuration(600);  // 600ms连续静音后认为语音结束
+                voice_detector->resetVoiceEndDetection();  // 重置语音结束检测状态
+                
+                LOG_INFO("VAD instance configuration successful, 智能分段已启用（600ms静音阈值）");
             } catch (const std::exception& e) {
                 LOG_WARNING("VAD parameter configuration failed but instance exists: " + std::string(e.what()));
                 // 不因为配置失败就放弃使用VAD
@@ -7046,7 +7155,7 @@ bool AudioProcessor::startStreamAudioExtraction() {
                 int no_data_cycles = 0;
                 int force_segment_cycles = 0;
                 const int max_no_data_cycles = 100; // 如果1秒内没有数据就检查错误
-                const int force_segment_trigger_cycles = 1000; // 10秒（1000 * 10ms）触发强制分段
+                const int force_segment_trigger_cycles = 1500; // 15秒（1500 * 10ms）触发强制分段
                 
                 LOG_INFO("Starting audio data reading loop");
                 
@@ -7104,9 +7213,9 @@ bool AudioProcessor::startStreamAudioExtraction() {
                                     static int stream_consecutive_silence_frames = 0;
                                     static auto last_force_segment_time = std::chrono::steady_clock::now();
                                     const int stream_silence_threshold_frames = 25;  // 流音频需要更少的静音帧(约1.25秒)
-                                    const int force_segment_interval_ms = 10000;    // 10秒强制分段
+                                    const int force_segment_interval_ms = 15000;    // 15秒强制分段，避免打断长句话
                                     
-                                    // 检查是否需要强制分段（10秒定时器）
+                                    // 检查是否需要强制分段（15秒定时器）
                                     auto current_time = std::chrono::steady_clock::now();
                                     auto time_since_last_segment = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - last_force_segment_time);
                                     
@@ -7114,11 +7223,15 @@ bool AudioProcessor::startStreamAudioExtraction() {
                                     if (time_since_last_segment.count() >= force_segment_interval_ms) {
                                         force_segment = true;
                                         last_force_segment_time = current_time;
-                                        LOG_INFO("流音频：10秒定时器触发强制分段");
+                                        LOG_INFO("流音频：15秒定时器触发强制分段");
                                     }
                                     
-                                    if (voice_detector && ++stream_voice_detection_counter % 8 == 0) {  // 每8个缓冲区检测一次，提高响应速度
+                                    // VAD智能分段：修复检测逻辑，设置正确的标志
+                                    if (voice_detector && ++stream_voice_detection_counter % 1 == 0) {  // 每个缓冲区都检测，与文件处理保持一致
                                         bool has_voice = voice_detector->detect(float_samples, 16000);
+                                        
+                                        // 关键修复：设置is_silence标志，这是RealtimeSegmentHandler需要的
+                                        buffer.is_silence = !has_voice;
                                         
                                         if (!has_voice) {
                                             stream_consecutive_silence_frames++;
@@ -7126,30 +7239,24 @@ bool AudioProcessor::startStreamAudioExtraction() {
                                             stream_consecutive_silence_frames = 0;  // 重置静音计数
                                         }
                                         
-                                        // 增加语音结束检测的宽容度，避免截断最后几个字
-                                        // 从原来的可能很低的阈值提高到更安全的值
-                                        const int extended_silence_threshold = std::max(stream_silence_threshold_frames, 25); // 至少25帧(~0.5秒)
+                                        // 使用与文件处理一致的参数：4帧约120ms静音触发
+                                        const int vad_silence_threshold = 4; // 4帧约120ms静音，与文件处理保持一致
                                         
-                                        if (stream_consecutive_silence_frames >= extended_silence_threshold) {
-                                            // 额外验证：检查最近的音频能量是否真的很低
-                                            float recent_energy = 0.0f;
-                                            for (const float& sample : float_samples) {
-                                                recent_energy += sample * sample;
-                                            }
-                                            recent_energy /= float_samples.size();
-                                            
-                                            // 只有在能量确实很低时才标记语音结束
-                                            const float energy_threshold = 0.001f; // 调整能量阈值
-                                            if (recent_energy < energy_threshold) {
+                                        if (stream_consecutive_silence_frames >= vad_silence_threshold) {
+                                            // VAD智能分段：检测到静音结束，标记语音段结束
                                             buffer.voice_end = true;
                                             stream_consecutive_silence_frames = 0;  // 重置计数
                                             last_force_segment_time = current_time;  // 重置强制分段计时器
-                                                LOG_INFO("流音频：检测到连续静音且能量低，标记语音段结束");
-                                            } else {
-                                                // 能量不够低，可能还有语音，重置部分计数
-                                                stream_consecutive_silence_frames = std::max(0, stream_consecutive_silence_frames - 5);
-                                                LOG_DEBUG("流音频：虽然检测到静音但能量较高，可能仍有语音");
-                                            }
+                                            LOG_INFO("🎯 流音频VAD智能分段：检测到" + std::to_string(vad_silence_threshold) + "帧连续静音（约" + 
+                                                    std::to_string(vad_silence_threshold * 30) + "ms），触发语音段结束");
+                                        }
+                                        
+                                        // 添加VAD状态调试日志
+                                        if (stream_voice_detection_counter % 20 == 0) {  // 每20次检测输出一次状态
+                                            LOG_INFO("流音频VAD状态: 有语音=" + std::string(has_voice ? "是" : "否") + 
+                                                   ", 连续静音帧=" + std::to_string(stream_consecutive_silence_frames) + 
+                                                   ", 语音结束=" + std::string(buffer.voice_end ? "是" : "否") + 
+                                                   " (每帧" + std::to_string(30) + "ms)");
                                         }
                                     }
                                     
@@ -7158,9 +7265,7 @@ bool AudioProcessor::startStreamAudioExtraction() {
                                         buffer.voice_end = true;
                                     }
                                     
-                                    audio_queue->push(buffer);
-                                    
-                                    // 如果启用了实时分段，也将数据发送给分段处理器
+                                    // 根据是否启用实时分段，选择单一处理路径避免重复
                                     if (use_realtime_segments && segment_handler) {
                                         segment_handler->addBuffer(buffer);
                                         if (data_count % 50 == 1) {  // 每50次数据块记录一次，减少日志量
@@ -7168,8 +7273,12 @@ bool AudioProcessor::startStreamAudioExtraction() {
                                         }
                                     } else if (use_realtime_segments && !segment_handler) {
                                         LOG_ERROR("Realtime segments enabled but segment_handler is null!");
-                                    } else if (!use_realtime_segments) {
-                                        LOG_DEBUG("Realtime segments disabled, not sending to segment handler");
+                                        // 回退到音频队列处理
+                                        audio_queue->push(buffer);
+                                    } else {
+                                        // 未启用实时分段，使用传统的音频队列处理
+                                        audio_queue->push(buffer);
+                                        LOG_DEBUG("Realtime segments disabled, using audio queue");
                                     }
                                 } catch (const std::exception& e) {
                                     LOG_ERROR("Error pushing audio buffer to queue: " + std::string(e.what()));
@@ -7266,12 +7375,13 @@ bool AudioProcessor::startStreamAudioExtraction() {
                         final_buffer.data.clear();
                         final_buffer.timestamp = std::chrono::system_clock::now();
                         
-                        audio_queue->push(final_buffer);
-                        
-                        // 如果启用了实时分段，也发送结束标记给分段处理器
+                        // 根据是否启用实时分段，选择单一处理路径发送结束标记
                         if (use_realtime_segments && segment_handler) {
                             segment_handler->addBuffer(final_buffer);
                             LOG_INFO("Sent end-of-stream marker to segment handler");
+                        } else {
+                            audio_queue->push(final_buffer);
+                            LOG_INFO("Sent end-of-stream marker to audio queue");
                         }
                     }
                 }
@@ -7754,14 +7864,12 @@ void AudioProcessor::processCorrectionQueue() {
                 if (!final_text.isEmpty()) {
                     if (final_text != item.text) {
                         LOG_INFO("矫正完成，文本已改变: " + item.text.left(30).toStdString() + " -> " + final_text.left(30).toStdString());
-                        // 避免递归调用，直接调用GUI更新
-                        QMetaObject::invokeMethod(gui, "updateText", Qt::QueuedConnection, 
-                                                Q_ARG(QString, final_text), Q_ARG(QString, QString::fromStdString(item.output_type)));
                     } else {
                         LOG_INFO("矫正完成，文本无变化");
-                        QMetaObject::invokeMethod(gui, "updateText", Qt::QueuedConnection, 
-                                                Q_ARG(QString, final_text), Q_ARG(QString, QString::fromStdString(item.output_type)));
                     }
+                    
+                    // 使用原先的路径推送到GUI，避免递归调用safePushToGUI
+                    safePushToGUI(final_text, item.output_type, item.source_type);
                 } else {
                     LOG_INFO("矫正处理后文本为空，跳过输出");
                 }
@@ -7798,6 +7906,9 @@ void AudioProcessor::enqueueCorrectionTask(const QString& text, const std::strin
                 success = QMetaObject::invokeMethod(gui, "appendOpenAIOutput", 
                     Qt::QueuedConnection, Q_ARG(QString, text));
             } else if (output_type == "final") {
+                success = QMetaObject::invokeMethod(gui, "appendFinalOutput", 
+                    Qt::QueuedConnection, Q_ARG(QString, text));
+            } else if (output_type == "precise") {
                 success = QMetaObject::invokeMethod(gui, "appendFinalOutput", 
                     Qt::QueuedConnection, Q_ARG(QString, text));
             }

@@ -115,7 +115,7 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>false</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;RNNOISE_AVAILABLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
@@ -126,7 +126,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>C:\Users\89774\portaudio\build\Release\portaudio_x64.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml.lib;C:\Users\89774\source\repos\stream_recognizer\lib\whisper.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-cpu.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-base.lib;C:\Program Files\Mega-Nerd\libsndfile\lib\libsndfile-1.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Cored.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Widgetsd.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Gui.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Multimediad.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6MultimediaWidgetsd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>C:\Users\89774\portaudio\build\Release\portaudio_x64.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml.lib;C:\Users\89774\source\repos\stream_recognizer\lib\whisper.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-cpu.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-base.lib;C:\Program Files\Mega-Nerd\libsndfile\lib\libsndfile-1.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Cored.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Widgetsd.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Gui.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Multimediad.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6MultimediaWidgetsd.lib;C:\Users\89774\source\repos\stream_recognizer\lib\rnnoise.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>
@@ -139,7 +139,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;RNNOISE_AVAILABLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
@@ -151,7 +151,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>C:\Users\89774\portaudio\build\Release\portaudio_x64.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml.lib;C:\Users\89774\source\repos\stream_recognizer\lib\whisper.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-cpu.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-base.lib;C:\Program Files\Mega-Nerd\libsndfile\lib\libsndfile-1.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Core.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Widgets.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Gui.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Multimedia.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6MultimediaWidgets.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Network.lib;C:\Users\89774\source\repos\stream_recognizer\lib\fvad.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>C:\Users\89774\portaudio\build\Release\portaudio_x64.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml.lib;C:\Users\89774\source\repos\stream_recognizer\lib\whisper.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-cpu.lib;C:\Users\89774\source\repos\stream_recognizer\lib\ggml-base.lib;C:\Program Files\Mega-Nerd\libsndfile\lib\libsndfile-1.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Core.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Widgets.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Gui.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Multimedia.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6MultimediaWidgets.lib;C:\Qt\6.8.3\msvc2022_64\lib\Qt6Network.lib;C:\Users\89774\source\repos\stream_recognizer\lib\fvad.lib;C:\Users\89774\source\repos\stream_recognizer\lib\rnnoise.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -209,6 +209,7 @@
     <ClInclude Include="include\voice_activity_detector.h" />
     <ClInclude Include="include\whisper.h" />
     <ClInclude Include="include\whisper_gui.h" />
+    <ClInclude Include="include\rnnoise.h" />
     <ClInclude Include="libfvad-1.0\include\fvad.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

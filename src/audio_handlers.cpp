@@ -291,49 +291,98 @@ void FileAudioInput::processFile() {
             audio_buffer.data = std::move(processedAudioData); // 移动语义，避免复制
             audio_buffer.is_last = false;
             
-            // 根据模式不同处理
-            if (fast_mode) {
-                // 快速模式：批量处理
-                batchBuffers.emplace_back(std::move(audio_buffer)); // 使用emplace_back和移动语义
+            // 检查是否启用了实时分段，决定数据发送路径
+            bool use_realtime_segments = false;
+            if (queue && queue->getProcessor()) {
+                // 从AudioProcessor获取实时分段状态
+                auto processor = queue->getProcessor();
+                use_realtime_segments = processor->isRealtimeSegmentsEnabled();
+            }
+            
+            if (use_realtime_segments && queue && queue->getProcessor()) {
+                // 启用实时分段：直接发送到segment_handler，但要保持实时速度控制
+                auto processor = queue->getProcessor();
+                auto segment_handler = processor->getSegmentHandler();
                 
-                // 当积累足够的缓冲区时，串行推送所有数据
-                if (batchBuffers.size() >= batchSize) {
-                    for (auto& buf : batchBuffers) {
-                        queue->push(buf);
+                if (segment_handler) {
+                    // 保持实时速度控制 - 即使使用实时分段也要模拟实时播放速度
+                    if (!fast_mode) {
+                        // 计算这个缓冲区应该持续的时间（毫秒）
+                        // 16000 samples = 1秒，所以 samples * 1000 / 16000 = 时间（毫秒）
+                        const float waitpersent = 1.02; // 等待时间倍率 方便对轴
+                        int buffer_duration_ms = static_cast<int>(audio_buffer.data.size() * 1000 / 16000);
+                        
+                        // 实时模拟：这个缓冲区应该在多久后才被处理
+                        // 计算从上次处理完毕到现在的时间
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now - lastProcessTime).count();
+                        
+                        // 如果时间不够，则等待剩余时间
+                        if (elapsed < buffer_duration_ms * waitpersent) { // 使用102%的速度
+                            int sleep_time = static_cast<int>(buffer_duration_ms * waitpersent) - static_cast<int>(elapsed);
+                            if (sleep_time > 0) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
+                            }
+                        }
+                        
+                        // 更新处理时间
+                        lastProcessTime = std::chrono::steady_clock::now();
                     }
-                    batchBuffers.clear();
-                    // 重新预分配以保持容量
-                    if (batchBuffers.capacity() < batchSize) {
-                    batchBuffers.reserve(batchSize);
-                    }
+                    
+                    // 发送到segment_handler
+                    segment_handler->addBuffer(audio_buffer);
+                    //LOG_INFO("文件音频缓冲区发送到实时分段处理器（保持实时速度）");
+                } else {
+                    LOG_ERROR("实时分段已启用但segment_handler为空，回退到队列处理");
+                    queue->push(audio_buffer);
                 }
             } else {
-                // 实时模式：模拟实时速度处理
-                
-                // 计算这个缓冲区应该持续的时间（毫秒）
-                // 16000 samples = 1秒，所以 samples * 1000 / 16000 = 时间（毫秒）
-                const float waitpersent = 1.02;//等待时间倍率 方便对轴
-                int buffer_duration_ms = static_cast<int>(audio_buffer.data.size() * 1000 / 16000);
-                
-                // 实时模拟：这个缓冲区应该在多久后才被处理
-                // 计算从上次处理完毕到现在的时间
-                auto now = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - lastProcessTime).count();
-                
-                // 如果时间不够，则等待剩余时间
-                if (elapsed < buffer_duration_ms * waitpersent) { // 使用102%的速度
-                    int sleep_time = static_cast<int>(buffer_duration_ms * waitpersent) - static_cast<int>(elapsed);
-                    if (sleep_time > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
+                // 未启用实时分段：使用传统的队列处理路径
+                // 根据模式不同处理
+                if (fast_mode) {
+                    // 快速模式：批量处理
+                    batchBuffers.emplace_back(std::move(audio_buffer)); // 使用emplace_back和移动语义
+                    
+                    // 当积累足够的缓冲区时，串行推送所有数据
+                    if (batchBuffers.size() >= batchSize) {
+                        for (auto& buf : batchBuffers) {
+                            queue->push(buf);
+                        }
+                        batchBuffers.clear();
+                        // 重新预分配以保持容量
+                        if (batchBuffers.capacity() < batchSize) {
+                        batchBuffers.reserve(batchSize);
+                        }
                     }
+                } else {
+                    // 实时模式：模拟实时速度处理
+                    
+                    // 计算这个缓冲区应该持续的时间（毫秒）
+                    // 16000 samples = 1秒，所以 samples * 1000 / 16000 = 时间（毫秒）
+                    const float waitpersent = 1.02;//等待时间倍率 方便对轴
+                    int buffer_duration_ms = static_cast<int>(audio_buffer.data.size() * 1000 / 16000);
+                    
+                    // 实时模拟：这个缓冲区应该在多久后才被处理
+                    // 计算从上次处理完毕到现在的时间
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - lastProcessTime).count();
+                    
+                    // 如果时间不够，则等待剩余时间
+                    if (elapsed < buffer_duration_ms * waitpersent) { // 使用102%的速度
+                        int sleep_time = static_cast<int>(buffer_duration_ms * waitpersent) - static_cast<int>(elapsed);
+                        if (sleep_time > 0) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_time));
+                        }
+                    }
+                    
+                    // 推送缓冲区
+                    queue->push(audio_buffer);
+                    
+                    // 更新处理时间
+                    lastProcessTime = std::chrono::steady_clock::now();
                 }
-                
-                // 推送缓冲区
-                queue->push(audio_buffer);
-                
-                // 更新处理时间
-                lastProcessTime = std::chrono::steady_clock::now();
             }
             
             // 检查是否需要跳转到特定位置
@@ -375,9 +424,36 @@ void FileAudioInput::processFile() {
         // 发送剩余的批次缓冲区（如果有的话）
         if (!batchBuffers.empty()) {
             LOG_INFO("Sending remaining " + std::to_string(batchBuffers.size()) + " audio buffers after file loop");
-            for (auto& buf : batchBuffers) {
-                queue->push(buf);
+            
+            // 检查是否启用了实时分段，决定剩余缓冲区的发送路径
+            bool use_realtime_segments = false;
+            if (queue && queue->getProcessor()) {
+                use_realtime_segments = queue->getProcessor()->isRealtimeSegmentsEnabled();
             }
+            
+            if (use_realtime_segments && queue && queue->getProcessor()) {
+                // 启用实时分段：发送到segment_handler
+                auto processor = queue->getProcessor();
+                auto segment_handler = processor->getSegmentHandler();
+                
+                if (segment_handler) {
+                    for (auto& buf : batchBuffers) {
+                        segment_handler->addBuffer(buf);
+                    }
+                    LOG_INFO("Remaining buffers sent to segment handler");
+                } else {
+                    LOG_ERROR("实时分段已启用但segment_handler为空，回退到队列处理");
+                    for (auto& buf : batchBuffers) {
+                        queue->push(buf);
+                    }
+                }
+            } else {
+                // 未启用实时分段：发送到队列
+                for (auto& buf : batchBuffers) {
+                    queue->push(buf);
+                }
+            }
+            
             batchBuffers.clear();
         }
         
@@ -398,14 +474,36 @@ void FileAudioInput::processFile() {
             processor->processPendingAudioData();
         }
         
-        // 发送最后一个标记 - 确保分段处理器能识别文件结束
+        // 发送最后一个标记 - 根据实时分段状态选择正确的路径
         AudioBuffer last_buffer;
         last_buffer.is_last = true;
         last_buffer.data.clear();  // 空数据，仅作为结束标记
         last_buffer.timestamp = std::chrono::system_clock::now();
         
-        LOG_INFO("Sending final end-of-file marker to audio queue");
-        queue->push(last_buffer);
+        // 检查是否启用了实时分段，决定最后标记的发送路径
+        bool use_realtime_segments = false;
+        if (queue && queue->getProcessor()) {
+            use_realtime_segments = queue->getProcessor()->isRealtimeSegmentsEnabled();
+        }
+        
+        if (use_realtime_segments && queue && queue->getProcessor()) {
+            // 启用实时分段：发送到segment_handler
+            auto processor = queue->getProcessor();
+            auto segment_handler = processor->getSegmentHandler();
+            
+            if (segment_handler) {
+                segment_handler->addBuffer(last_buffer);
+                LOG_INFO("Sending final end-of-file marker to segment handler");
+            } else {
+                LOG_ERROR("实时分段已启用但segment_handler为空，回退到队列处理");
+                queue->push(last_buffer);
+                LOG_INFO("Sending final end-of-file marker to audio queue (fallback)");
+            }
+        } else {
+            // 未启用实时分段：发送到队列
+            queue->push(last_buffer);
+            LOG_INFO("Sending final end-of-file marker to audio queue");
+        }
         
         // 给队列一点时间处理最后的标记
         std::this_thread::sleep_for(std::chrono::milliseconds(200));

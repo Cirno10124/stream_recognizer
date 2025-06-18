@@ -2,6 +2,8 @@
 
 #include "audio_types.h"
 #include "audio_utils.h"
+#include "audio_preprocessor.h"
+#include "voice_activity_detector.h"
 #include <vector>
 #include <string>
 #include <thread>
@@ -83,6 +85,12 @@ public:
     // 设置是否使用重叠段处理
     void setUseOverlapProcessing(bool enable);
     
+    // 设置音频预处理器
+    void setAudioPreprocessor(AudioPreprocessor* preprocessor);
+    
+    // 设置VAD检测器
+    void setVoiceActivityDetector(VoiceActivityDetector* detector);
+    
 private:
     // 处理线程函数
     void processingThread();
@@ -159,4 +167,8 @@ private:
     
     std::unique_ptr<AudioQueue> audio_queue;
     std::unique_ptr<ResultQueue> result_queue;
+    
+    // 音频处理组件
+    AudioPreprocessor* audio_preprocessor = nullptr;      // 音频预处理器
+    VoiceActivityDetector* voice_detector = nullptr;      // VAD检测器
 }; 
