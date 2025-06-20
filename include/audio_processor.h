@@ -527,55 +527,6 @@ private:
     // 音频质量检查方法
     bool isAudioSegmentValid(const std::vector<AudioBuffer>& buffers);
     
-    // 自适应VAD阈值相关方法和变量
-    void updateAdaptiveVADThreshold(const std::vector<float>& audio_data);
-    float calculateAudioEnergy(const std::vector<float>& audio_data);
-    void resetAdaptiveVAD();
-    
-    // 自适应VAD阈值相关成员变量
-    bool use_adaptive_vad{true};  // 是否使用自适应VAD阈值
-    std::vector<float> energy_history;  // 音频能量历史记录
-    float adaptive_threshold{0.01f};  // 自适应计算出的阈值
-    size_t energy_samples_collected{0};  // 已收集的能量样本数
-    size_t target_energy_samples{0};  // 目标收集样本数（1-2分钟的音频）
-    bool adaptive_threshold_ready{false};  // 自适应阈值是否已准备好
-    float base_energy_level{0.0f};  // 基础能量水平
-    
-    // 添加防止重复推送到GUI的机制
-    std::unordered_set<std::string> pushed_results_cache;  // 缓存已推送的结果hash
-    std::mutex push_cache_mutex;  // 保护缓存的互斥锁
-    
-    // 线程安全保护
-    std::mutex audio_processing_mutex;  // 保护音频处理相关资源的互斥锁
-    // 移除媒体播放器互斥锁，简化避免死锁
-    
-    // 生成结果的唯一标识符的方法
-    std::string generateResultHash(const QString& result, const std::string& source_type);
-    
-    // 安全推送结果到GUI的方法
-    bool safePushToGUI(const QString& result, const std::string& output_type, const std::string& source_type);
-    
-    // 静态成员：跟踪所有AudioProcessor实例
-    static std::set<AudioProcessor*> all_instances;
-    static std::mutex instances_mutex;
-    
-    // 网络超时和重试机制
-    struct RequestInfo {
-        int retry_count = 0;
-        std::chrono::system_clock::time_point start_time;
-        std::string file_path;
-        RecognitionParams params;
-        qint64 file_size = 0;
-    };
-    
-    std::unordered_map<int, RequestInfo> active_requests;
-    mutable std::mutex active_requests_mutex;
-    
-    // 动态超时计算
-    int calculateDynamicTimeout(qint64 file_size_bytes);
-    bool shouldRetryRequest(int request_id, QNetworkReply::NetworkError error);
-    void retryRequest(int request_id);
-    
     // 音频流自适应检测和优化
     struct AudioStreamInfo {
         QString codec;
@@ -591,4 +542,33 @@ private:
     
     // 视频流音频提取
     bool startStreamAudioExtraction();
+    
+    // 请求管理相关变量
+    struct RequestInfo {
+        std::string file_path;
+        std::chrono::system_clock::time_point start_time;
+        int retry_count = 0;
+        RecognitionParams params;
+        qint64 file_size = 0;
+        bool is_final_segment = false;
+    };
+    
+    std::map<int, RequestInfo> active_requests;
+    mutable std::mutex active_requests_mutex;
+    std::mutex audio_processing_mutex;
+    
+    // 推送结果缓存
+    std::set<std::string> pushed_results_cache;
+    std::mutex push_cache_mutex;
+    
+    // 实例管理
+    static std::vector<AudioProcessor*> all_instances;
+    static std::mutex instances_mutex;
+    
+    // 辅助方法
+    std::string generateResultHash(const QString& result, const std::string& source_type);
+    bool safePushToGUI(const QString& result, const std::string& source_type = "unknown", const std::string& output_type = "realtime");
+    int calculateDynamicTimeout(qint64 file_size_bytes);
+    bool shouldRetryRequest(int request_id, QNetworkReply::NetworkError error);
+    void retryRequest(int request_id);
 };

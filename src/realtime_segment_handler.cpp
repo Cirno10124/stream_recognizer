@@ -225,13 +225,22 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
     AudioBuffer processed_buffer = buffer;
     
     // 应用音频预处理（如果有预处理器）
+    static int preprocessing_counter = 0;
     if (audio_preprocessor && !buffer.data.empty()) {
         processed_buffer.data = buffer.data; // 复制原始数据
         audio_preprocessor->process(processed_buffer.data, buffer.sample_rate);
-        LOG_INFO("应用音频预处理，样本数: " + std::to_string(processed_buffer.data.size()));
+        
+        // 减少预处理日志频率：每50次记录一次
+        preprocessing_counter++;
+        if (preprocessing_counter == 1 || preprocessing_counter % 50 == 0) {
+            LOG_INFO("音频预处理 #" + std::to_string(preprocessing_counter) + 
+                    " (样本数: " + std::to_string(processed_buffer.data.size()) + ")");
+        }
     }
     
     // 应用VAD检测（如果有VAD检测器且不是最后缓冲区）
+    static bool last_vad_state = false;
+    static int vad_counter = 0;
     if (voice_detector && !buffer.is_last && !buffer.data.empty()) {
         bool has_voice = voice_detector->detect(processed_buffer.data, buffer.sample_rate);
         
@@ -244,8 +253,17 @@ void RealtimeSegmentHandler::processBufferDirectly(const AudioBuffer& buffer) {
             LOG_INFO("🎯 VAD检测到语音结束，标记语音段结束");
         }
         
-        LOG_INFO("VAD检测结果: " + std::string(has_voice ? "有语音" : "静音") + 
-                ", 语音结束: " + std::string(processed_buffer.voice_end ? "是" : "否"));
+        // 只在状态变化或每100次时记录VAD结果
+        vad_counter++;
+        bool vad_state_changed = (has_voice != last_vad_state);
+        
+        if (vad_state_changed || vad_counter % 100 == 0 || processed_buffer.voice_end) {
+            LOG_INFO("VAD #" + std::to_string(vad_counter) + ": " + 
+                    std::string(has_voice ? "有语音" : "静音") + 
+                    (vad_state_changed ? " (状态变化)" : "") +
+                    (processed_buffer.voice_end ? " | 语音结束" : ""));
+            last_vad_state = has_voice;
+        }
     }
     
     // 检查是否需要生成段

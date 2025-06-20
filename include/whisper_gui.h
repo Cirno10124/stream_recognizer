@@ -66,7 +66,10 @@ public:
     // QVideoWidget* getVideoWidget() { return videoWidget; }
 
 public slots:
+    void appendResult(const QString& text);
+    void appendFinalResult(const QString& text);
     void appendFinalOutput(const QString& text);
+    void appendOpenAIOutput(const QString& text);
     void appendLogMessage(const QString& message);
     void appendErrorMessage(const QString& error);
     void onOpenAIResultReady(const QString& result);

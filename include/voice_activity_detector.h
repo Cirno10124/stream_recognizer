@@ -114,6 +114,18 @@ public:
     
     // 检查VAD实例是否已正确初始化
     bool isVADInitialized() const;
+    
+    // 高级VAD调优方法
+    void setMinVoiceFrames(int frames);      // 设置最小语音帧数
+    void setVoiceHoldFrames(int frames);     // 设置语音保持帧数
+    void setEnergyThreshold(float threshold); // 设置能量阈值
+    void setAdaptiveMode(bool enable);       // 启用自适应模式
+    
+    // 获取当前参数
+    int getMinVoiceFrames() const { return min_voice_frames; }
+    int getVoiceHoldFrames() const { return voice_hold_frames; }
+    float getEnergyThreshold() const { return energy_threshold; }
+    bool isAdaptiveMode() const { return adaptive_mode; }
 
 private:
     // VAD阈值，值越大检测越严格
@@ -154,5 +166,16 @@ private:
     size_t silence_frames_count = 0;    // 连续静音帧计数
     size_t required_silence_frames = 0; // 判定为语音结束所需的连续静音帧数
     bool speech_ended = false;          // 语音是否已结束标志
+    
+    // 高级VAD参数
+    float energy_threshold = 0.001f;    // 能量阈值，低于此值认为是静音
+    bool adaptive_mode = false;         // 是否启用自适应模式
+    float background_energy = 0.0f;     // 背景噪音能量水平
+    int background_frames_count = 0;    // 背景噪音统计帧数
+    
+    // 日志优化相关变量
+    bool last_logged_state = false;     // 上次记录的语音状态
+    int state_change_counter = 0;       // 状态变化计数器
+    int frames_since_last_log = 0;      // 距离上次日志的帧数
 };
 

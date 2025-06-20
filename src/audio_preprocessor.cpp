@@ -4,6 +4,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <limits>
+#include <iomanip>
+#include <iostream>
 
 // 定义PI常量（如果系统没有定义）
 #ifndef M_PI
@@ -49,7 +51,7 @@ AudioPreprocessor::AudioPreprocessor()
     , noise_suppression_mix_ratio(0.2f) // 🔧 新增：混合比例（0.2=80%处理+20%原始）
     , use_adaptive_suppression(false)   // 🔧 新增：启用自适应抑制
     , vad_energy_threshold(0.001f)     // 🔧 新增：VAD能量阈值
-    , use_final_gain(false)           // 🔧 临时禁用整体音量放大
+    , use_final_gain(true)           // 🔧 临时禁用整体音量放大
     , final_gain_factor(1.7f)          // 默认放大1.5倍
     , attack_time(0.01f)              // AGC攻击时间
     , release_time(0.1f)              // AGC释放时间
@@ -122,19 +124,41 @@ bool AudioPreprocessor::isNoiseSuppressionAvailable() const {
 }
 
 void AudioPreprocessor::convertFloatToPCM16(const std::vector<float>& float_buffer, std::vector<short>& pcm_buffer) {
+    if (float_buffer.empty()) {
+        pcm_buffer.clear();
+        return;
+    }
+    
     pcm_buffer.resize(float_buffer.size());
     for (size_t i = 0; i < float_buffer.size(); ++i) {
-        // 将float范围[-1.0, 1.0]转换为PCM16范围[-32768, 32767]
-        float sample = clamp(float_buffer[i], -1.0f, 1.0f);
-        pcm_buffer[i] = static_cast<short>(sample * 32767.0f);
+        // 🔧 添加数值有效性检查
+        if (std::isfinite(float_buffer[i])) {
+            // 将float范围[-1.0, 1.0]转换为PCM16范围[-32768, 32767]
+            float sample = clamp(float_buffer[i], -1.0f, 1.0f);
+            pcm_buffer[i] = static_cast<short>(sample * 32767.0f);
+        } else {
+            // 无效数值时使用静音
+            pcm_buffer[i] = 0;
+        }
     }
 }
 
 void AudioPreprocessor::convertPCM16ToFloat(const std::vector<short>& pcm_buffer, std::vector<float>& float_buffer) {
+    if (pcm_buffer.empty()) {
+        float_buffer.clear();
+        return;
+    }
+    
     float_buffer.resize(pcm_buffer.size());
     for (size_t i = 0; i < pcm_buffer.size(); ++i) {
         // 将PCM16范围[-32768, 32767]转换为float范围[-1.0, 1.0]
-        float_buffer[i] = static_cast<float>(pcm_buffer[i]) / 32767.0f;
+        float converted = static_cast<float>(pcm_buffer[i]) / 32767.0f;
+        // 🔧 添加数值有效性检查和范围限制
+        if (std::isfinite(converted)) {
+            float_buffer[i] = clamp(converted, -1.0f, 1.0f);
+        } else {
+            float_buffer[i] = 0.0f; // 无效数值时使用静音
+        }
     }
 }
 
@@ -380,39 +404,52 @@ void AudioPreprocessor::processWithNative16k(std::vector<float>& audio_buffer, v
     std::cout << "[AudioPreprocessor] 使用16kHz专用RNNoise处理" << std::endl;
 }
 
-// 原版库的适配处理方法
+// 🔧 修复：原版库的适配处理方法（内存安全版本）
 void AudioPreprocessor::processWithAdapted48k(std::vector<float>& audio_buffer, void* state) {
     DenoiseState* denoise_state = static_cast<DenoiseState*>(state);
     
+    // 🔧 使用thread_local缓存避免频繁分配
+    static thread_local std::vector<short> pcm_buffer_cache;
+    static thread_local std::vector<float> float_buffer_cache;
+    
     // 转换为PCM16格式（原版RNNoise期望的格式）
-    std::vector<short> pcm_buffer;
-    convertFloatToPCM16(audio_buffer, pcm_buffer);
+    convertFloatToPCM16(audio_buffer, pcm_buffer_cache);
     
     // 确保缓冲区大小是480的倍数
     const size_t frame_size = RNNOISE_FRAME_SIZE;  // 480
-    size_t padded_size = ((pcm_buffer.size() + frame_size - 1) / frame_size) * frame_size;
-    pcm_buffer.resize(padded_size, 0);
+    size_t padded_size = ((pcm_buffer_cache.size() + frame_size - 1) / frame_size) * frame_size;
+    pcm_buffer_cache.resize(padded_size, 0);
     
     // 分块处理
-    for (size_t i = 0; i + frame_size <= pcm_buffer.size(); i += frame_size) {
+    for (size_t i = 0; i + frame_size <= pcm_buffer_cache.size(); i += frame_size) {
         float frame_data[RNNOISE_FRAME_SIZE];
         
         // 转换为float格式
         for (size_t j = 0; j < frame_size; ++j) {
-            frame_data[j] = static_cast<float>(pcm_buffer[i + j]);
+            frame_data[j] = static_cast<float>(pcm_buffer_cache[i + j]);
         }
         
         // 应用RNNoise
         rnnoise_process_frame(denoise_state, frame_data, frame_data);
         
-        // 转换回PCM16格式
+        // 转换回PCM16格式，添加安全检查
         for (size_t j = 0; j < frame_size; ++j) {
-            pcm_buffer[i + j] = static_cast<short>(clamp(frame_data[j], -32768.0f, 32767.0f));
-        } 
+            if (std::isfinite(frame_data[j])) {
+                pcm_buffer_cache[i + j] = static_cast<short>(clamp(frame_data[j], -32768.0f, 32767.0f));
+            } else {
+                pcm_buffer_cache[i + j] = 0; // 无效数值时使用静音
+            }
+        }
     }
     
     // 转换回float格式
-    convertPCM16ToFloat(pcm_buffer, audio_buffer);
+    convertPCM16ToFloat(pcm_buffer_cache, float_buffer_cache);
+    
+    // 安全复制结果
+    if (float_buffer_cache.size() != audio_buffer.size()) {
+        audio_buffer.resize(float_buffer_cache.size());
+    }
+    std::copy(float_buffer_cache.begin(), float_buffer_cache.end(), audio_buffer.begin());
     
     std::cout << "[AudioPreprocessor] 使用原版RNNoise适配处理" << std::endl;
 }
@@ -424,21 +461,25 @@ void AudioPreprocessor::processWithHighQualityResampling(std::vector<float>& aud
     // 计算原始RMS用于质量检查
     float original_rms = calculateRMS(audio_buffer);
     
+    // 🔧 修复：使用thread_local缓存避免大量内存分配
+    static thread_local std::vector<float> upsampled_cache;
+    static thread_local std::vector<float> downsampled_cache;
+    
     // 高质量上采样：16kHz -> 48kHz (使用Lanczos重采样)
-    std::vector<float> upsampled = upsampleLanczos(audio_buffer, 16000, 48000);
+    upsampled_cache = upsampleLanczos(audio_buffer, 16000, 48000);
     
     // 确保大小是480的倍数
     const size_t frame_size = RNNOISE_FRAME_SIZE;
-    size_t padded_size = ((upsampled.size() + frame_size - 1) / frame_size) * frame_size;
-    upsampled.resize(padded_size, 0.0f);
+    size_t padded_size = ((upsampled_cache.size() + frame_size - 1) / frame_size) * frame_size;
+    upsampled_cache.resize(padded_size, 0.0f);
     
     // 分帧处理48kHz数据
-    for (size_t i = 0; i + frame_size <= upsampled.size(); i += frame_size) {
+    for (size_t i = 0; i + frame_size <= upsampled_cache.size(); i += frame_size) {
         float frame_data[RNNOISE_FRAME_SIZE];
         
         // 复制数据
         for (size_t j = 0; j < frame_size; ++j) {
-            frame_data[j] = upsampled[i + j];
+            frame_data[j] = upsampled_cache[i + j];
         }
         
         // 应用RNNoise
@@ -446,12 +487,18 @@ void AudioPreprocessor::processWithHighQualityResampling(std::vector<float>& aud
         
         // 复制回去
         for (size_t j = 0; j < frame_size; ++j) {
-            upsampled[i + j] = frame_data[j];
+            upsampled_cache[i + j] = frame_data[j];
         }
     }
     
     // 高质量下采样：48kHz -> 16kHz
-    audio_buffer = downsampleLanczos(upsampled, 48000, 16000);
+    downsampled_cache = downsampleLanczos(upsampled_cache, 48000, 16000);
+    
+    // 🔧 修复：安全复制结果，避免重新分配
+    if (downsampled_cache.size() != audio_buffer.size()) {
+        audio_buffer.resize(downsampled_cache.size());
+    }
+    std::copy(downsampled_cache.begin(), downsampled_cache.end(), audio_buffer.begin());
     
     // 质量检查
     float processed_rms = calculateRMS(audio_buffer);
@@ -462,41 +509,52 @@ void AudioPreprocessor::processWithHighQualityResampling(std::vector<float>& aud
     std::cout << "[AudioPreprocessor] 使用高质量重采样RNNoise处理" << std::endl;
 }
 
-// 简单处理方法（备用）
+// 🔧 修复：简单处理方法（内存安全版本）
 void AudioPreprocessor::processWithSimpleMethod(std::vector<float>& audio_buffer, void* state) {
     // 使用用户修改后的简单方法
     DenoiseState* denoise_state = static_cast<DenoiseState*>(state);
     
+    // 🔧 使用thread_local缓存避免频繁分配
+    static thread_local std::vector<short> pcm_buffer_cache;
+    static thread_local std::vector<float> float_buffer_cache;
+    
     // 转换为PCM16格式
-    std::vector<short> pcm_buffer;
-    convertFloatToPCM16(audio_buffer, pcm_buffer);
+    convertFloatToPCM16(audio_buffer, pcm_buffer_cache);
     
     // 分块处理
     const size_t frame_size = RNNOISE_FRAME_SIZE;
-    for (size_t i = 0; i + frame_size <= pcm_buffer.size(); i += frame_size) {
+    for (size_t i = 0; i + frame_size <= pcm_buffer_cache.size(); i += frame_size) {
         float frame_data[RNNOISE_FRAME_SIZE];
         
         // 转换为float格式
         for (size_t j = 0; j < frame_size; ++j) {
-            frame_data[j] = static_cast<float>(pcm_buffer[i + j]);
+            frame_data[j] = static_cast<float>(pcm_buffer_cache[i + j]);
         }
         
         // 应用RNNoise
         rnnoise_process_frame(denoise_state, frame_data, frame_data);
         
-        // 转换回PCM16格式
+        // 转换回PCM16格式，添加安全检查
         for (size_t j = 0; j < frame_size; ++j) {
-            pcm_buffer[i + j] = static_cast<short>(clamp(frame_data[j], -32768.0f, 32767.0f));
+            if (std::isfinite(frame_data[j])) {
+                pcm_buffer_cache[i + j] = static_cast<short>(clamp(frame_data[j], -32768.0f, 32767.0f));
+            } else {
+                pcm_buffer_cache[i + j] = 0; // 无效数值时使用静音
+            }
         }
     }
     
     // 转换回float格式
-    convertPCM16ToFloat(pcm_buffer, audio_buffer);
+    convertPCM16ToFloat(pcm_buffer_cache, float_buffer_cache);
+    
+    // 安全复制结果
+    if (float_buffer_cache.size() != audio_buffer.size()) {
+        audio_buffer.resize(float_buffer_cache.size());
+    }
+    std::copy(float_buffer_cache.begin(), float_buffer_cache.end(), audio_buffer.begin());
     
     std::cout << "[AudioPreprocessor] 使用简单适配RNNoise处理" << std::endl;
 }
-
-
 
 // 辅助函数：计算RMS
 float AudioPreprocessor::calculateRMS(const std::vector<float>& buffer) {
@@ -509,19 +567,27 @@ float AudioPreprocessor::calculateRMS(const std::vector<float>& buffer) {
     return std::sqrt(sum_squares / buffer.size());
 }
 
-// 辅助函数：Lanczos上采样（高质量）
+// 🔧 修复：Lanczos上采样（内存安全版本）
 std::vector<float> AudioPreprocessor::upsampleLanczos(const std::vector<float>& input, int orig_sr, int target_sr) {
+    if (input.empty()) {
+        return std::vector<float>();
+    }
+    
     // 简化的Lanczos重采样实现
     float ratio = static_cast<float>(target_sr) / orig_sr;
     size_t output_size = static_cast<size_t>(input.size() * ratio);
-    std::vector<float> output(output_size);
+    
+    // 🔧 使用thread_local缓存避免频繁分配
+    static thread_local std::vector<float> output_cache;
+    output_cache.clear();
+    output_cache.reserve(output_size);
+    output_cache.resize(output_size);
     
     const int a = 3;  // Lanczos参数
     
     for (size_t i = 0; i < output_size; ++i) {
         float src_pos = i / ratio;
         int src_idx = static_cast<int>(src_pos);
-        float frac = src_pos - src_idx;
         
         float sum = 0.0f;
         float weight_sum = 0.0f;
@@ -530,23 +596,34 @@ std::vector<float> AudioPreprocessor::upsampleLanczos(const std::vector<float>& 
             if (j >= 0 && j < static_cast<int>(input.size())) {
                 float x = src_pos - j;
                 float weight = (x == 0) ? 1.0f : (a * std::sin(M_PI * x) * std::sin(M_PI * x / a)) / (M_PI * M_PI * x * x);
-                sum += input[j] * weight;
-                weight_sum += weight;
+                if (std::isfinite(weight)) {
+                    sum += input[j] * weight;
+                    weight_sum += weight;
+                }
             }
         }
         
-        output[i] = (weight_sum > 0) ? sum / weight_sum : 0.0f;
+        output_cache[i] = (weight_sum > 0) ? sum / weight_sum : 0.0f;
     }
     
-    return output;
+    return output_cache;
 }
 
-// 辅助函数：Lanczos下采样（高质量）
+// 🔧 修复：Lanczos下采样（内存安全版本）
 std::vector<float> AudioPreprocessor::downsampleLanczos(const std::vector<float>& input, int orig_sr, int target_sr) {
+    if (input.empty()) {
+        return std::vector<float>();
+    }
+    
     // 简化的Lanczos重采样实现
     float ratio = static_cast<float>(target_sr) / orig_sr;
     size_t output_size = static_cast<size_t>(input.size() * ratio);
-    std::vector<float> output(output_size);
+    
+    // 🔧 使用thread_local缓存避免频繁分配
+    static thread_local std::vector<float> output_cache;
+    output_cache.clear();
+    output_cache.reserve(output_size);
+    output_cache.resize(output_size);
     
     const int a = 3;  // Lanczos参数
     
@@ -561,83 +638,107 @@ std::vector<float> AudioPreprocessor::downsampleLanczos(const std::vector<float>
             if (j >= 0 && j < static_cast<int>(input.size())) {
                 float x = src_pos - j;
                 float weight = (x == 0) ? 1.0f : (a * std::sin(M_PI * x) * std::sin(M_PI * x / a)) / (M_PI * M_PI * x * x);
-                sum += input[j] * weight;
-                weight_sum += weight;
+                if (std::isfinite(weight)) {
+                    sum += input[j] * weight;
+                    weight_sum += weight;
+                }
             }
         }
         
-        output[i] = (weight_sum > 0) ? sum / weight_sum : 0.0f;
+        output_cache[i] = (weight_sum > 0) ? sum / weight_sum : 0.0f;
     }
     
-    return output;
+    return output_cache;
 }
 
 void AudioPreprocessor::process(std::vector<float>& audio_buffer, int sample_rate) {
     if (audio_buffer.empty()) return;
     
-    // 🔍 调试：输出原始音频信息
+    // 计算原始音频信息
     float original_rms = calculateRMS(audio_buffer);
     float original_max = 0.0f;
     for (float sample : audio_buffer) {
         original_max = std::max(original_max, std::abs(sample));
     }
-    std::cout << "[AudioPreprocessor::process] 原始音频 - RMS: " << original_rms 
-              << ", 最大值: " << original_max 
-              << ", 样本数: " << audio_buffer.size() << std::endl;
+    
+    // 日志优化：只在显著变化或每100次处理时输出
+    log_counter++;
+    bool should_log = false;
+    const float rms_change_threshold = 0.02f; // RMS变化阈值
+    
+    if (log_counter == 1 || log_counter % 100 == 0) {
+        should_log = true; // 首次或每100次
+    } else if (std::abs(original_rms - last_logged_rms) > rms_change_threshold) {
+        should_log = true; // RMS显著变化
+    }
+    
+    if (should_log) {
+        std::cout << "[AudioPreprocessor] 处理音频 #" << log_counter 
+                  << " - RMS: " << std::fixed << std::setprecision(4) << original_rms 
+                  << ", 最大值: " << original_max 
+                  << ", 样本数: " << audio_buffer.size() << std::endl;
+        last_logged_rms = original_rms;
+    }
     
     // 按照处理顺序应用各个预处理步骤 
+    std::string processing_steps;
+    
     if (use_pre_emphasis) {
         applyPreEmphasis(audio_buffer, pre_emphasis_coef);
-        float rms = calculateRMS(audio_buffer);
-        std::cout << "[AudioPreprocessor::process] 预加重后 - RMS: " << rms << std::endl;
+        if (should_log) processing_steps += "预加重→";
     }
     
     if (use_high_pass) {
         applyHighPassFilter(audio_buffer, high_pass_cutoff, sample_rate);
-        float rms = calculateRMS(audio_buffer);
-        std::cout << "[AudioPreprocessor::process] 高通滤波后 - RMS: " << rms << std::endl;
+        if (should_log) processing_steps += "高通→";
     }
     
     if (use_agc) {
         applyAGC(audio_buffer, target_level);
-        float rms = calculateRMS(audio_buffer);
-        std::cout << "[AudioPreprocessor::process] AGC后 - RMS: " << rms 
-                  << ", 当前增益: " << current_gain << std::endl;
+        if (should_log) processing_steps += "AGC→";
     }
     
     if (use_compression) {
         applyCompression(audio_buffer);
-        float rms = calculateRMS(audio_buffer);
-        std::cout << "[AudioPreprocessor::process] 压缩后 - RMS: " << rms << std::endl;
+        if (should_log) processing_steps += "压缩→";
     }
     
     if (use_noise_suppression) {
         applyNoiseSuppression(audio_buffer);
+        if (should_log) processing_steps += "降噪→";
     }
     
     // 最后进行整体音量放大（如果启用）
     if (use_final_gain && final_gain_factor != 1.0f) {
-        float rms_before = calculateRMS(audio_buffer);
         for (float& sample : audio_buffer) {
             sample *= final_gain_factor;
             // 防止削波，限制在[-1.0, 1.0]范围内
             sample = clamp(sample, -1.0f, 1.0f);
         }
-        float rms_after = calculateRMS(audio_buffer);
-        std::cout << "[AudioPreprocessor::process] 最终增益后 - RMS: " << rms_after 
-                  << " (增益: " << final_gain_factor << ")" << std::endl;
+        if (should_log) processing_steps += "增益→";
     }
     
-    // 🔍 调试：输出最终音频信息
-    float final_rms = calculateRMS(audio_buffer);
-    float final_max = 0.0f;
-    for (float sample : audio_buffer) {
-        final_max = std::max(final_max, std::abs(sample));
+    // 只在需要记录日志时计算最终信息
+    if (should_log) {
+        float final_rms = calculateRMS(audio_buffer);
+        float final_max = 0.0f;
+        for (float sample : audio_buffer) {
+            final_max = std::max(final_max, std::abs(sample));
+        }
+        
+        // 移除末尾的箭头
+        if (!processing_steps.empty() && processing_steps.back() == 0x2192) { // →的Unicode
+            processing_steps.pop_back();
+        }
+        if (processing_steps.empty()) {
+            processing_steps = "无处理";
+        }
+        
+        std::cout << "[AudioPreprocessor] 处理完成: " << processing_steps 
+                  << " | 最终RMS: " << std::fixed << std::setprecision(4) << final_rms
+                  << " (变化: " << std::setprecision(1) << (final_rms / original_rms * 100.0f) << "%)"
+                  << " | 最大值: " << std::setprecision(4) << final_max << std::endl;
     }
-    std::cout << "[AudioPreprocessor::process] 最终音频 - RMS: " << final_rms 
-              << ", 最大值: " << final_max 
-              << ", 变化: " << (final_rms / original_rms * 100.0f) << "%" << std::endl;
-    std::cout << "=====================================\n" << std::endl;
 }
 
 // 🔧 修复：自适应噪声抑制处理（增加安全检查）

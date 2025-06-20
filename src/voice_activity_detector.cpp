@@ -5,6 +5,7 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <iomanip>
 extern "C" {
 #include <fvad.h>  // WebRTC VAD的头文件
 #include <audio_types.h>
@@ -21,31 +22,27 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
     , average_energy(0.0f)
     , silence_counter(0)
     , voice_counter(0)
-    , min_voice_frames(3)     // 减小至3帧提高响应速度
-    , voice_hold_frames(10)    // 稍微减小保持帧数
-    , vad_mode(2)             // 默认使用最敏感模式
+    , min_voice_frames(5)     // 增加至5帧，减少对短暂噪音的误判
+    , voice_hold_frames(15)    // 增加保持帧数，让VAD更严格地确认语音结束
+    , vad_mode(1)             // 默认使用质量模式，更好地过滤噪音
     , vad_instance(nullptr)
     , silence_frames_count(0)
-    , required_silence_frames(8) // 默认0.6秒 (12帧 * 30ms/帧)
+    , required_silence_frames(12) // 增加至0.8秒 (12帧 * 30ms/帧)，更严格的静音检测
     , speech_ended(false)
 {
     // 初始化静音历史
     silence_history.clear();
     
     // 安全初始化WebRTC VAD
-    std::cout << "[VAD] 开始初始化WebRTC VAD..." << std::endl;
+    std::cout << "[VAD] 初始化WebRTC VAD (模式:" << vad_mode << ", 帧数:" << min_voice_frames << "/" << voice_hold_frames << ")..." << std::endl;
     
     try {
-        // 验证系统状态和内存可用性
-        std::cout << "[VAD] 检查系统内存状态..." << std::endl;
-        
-        // 尝试小量内存分配来验证堆状态
+        // 验证系统状态和内存可用性（静默检查）
         {
             std::unique_ptr<char[]> test_memory = std::make_unique<char[]>(1024);
             if (!test_memory) {
                 throw std::runtime_error("Memory allocation test failed");
             }
-            std::cout << "[VAD] 内存状态检查通过" << std::endl;
         }
         
         // 创建VAD实例，使用重试机制
@@ -54,14 +51,19 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
         bool configuration_success = false;
         
         while (retry_count < max_retries && !configuration_success) {
-            std::cout << "[VAD] 尝试创建WebRTC VAD实例 (第 " << (retry_count + 1) << " 次)..." << std::endl;
+            if (retry_count > 0) {  // 只在重试时显示详细信息
+                std::cout << "[VAD] 重试创建VAD实例 (第 " << (retry_count + 1) << " 次)..." << std::endl;
+            }
             
             if (!vad_instance) {
             vad_instance = safeCreateVADInstance();
             }
             
             if (vad_instance) {
-                std::cout << "[VAD] WebRTC VAD实例创建成功，地址: " << vad_instance << std::endl;
+                // 只在首次创建时显示详细信息
+                if (retry_count == 0) {
+                    std::cout << "[VAD] WebRTC VAD实例创建成功" << std::endl;
+                }
                 
                 // 验证实例有效性 - 使用更宽容的策略
                 int mode_result = fvad_set_mode(vad_instance, vad_mode);
@@ -87,7 +89,6 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
                 
                 // 只要其中一个配置成功，就认为可以使用
                 if (mode_result >= 0 || rate_result >= 0) {
-                    std::cout << "[VAD] VAD配置成功 (模式: " << vad_mode << ")" << std::endl;
                     configuration_success = true;
                 break; // 成功创建并配置
                 } else {
@@ -111,11 +112,11 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
             throw std::runtime_error("Failed to create WebRTC VAD after " + std::to_string(max_retries) + " attempts");
         }
         
-        if (!configuration_success) {
+        if (configuration_success) {
+            std::cout << "[VAD] WebRTC VAD初始化完成 ✓" << std::endl;
+        } else {
             std::cerr << "[VAD] 警告：VAD配置部分失败，但实例存在，将继续运行" << std::endl;
         }
-        
-        std::cout << "[VAD] WebRTC VAD初始化完成" << std::endl;
         
     } catch (const std::exception& e) {
         std::cerr << "[VAD] 初始化异常: " << e.what() << std::endl;
@@ -229,9 +230,31 @@ bool VoiceActivityDetector::detect(const std::vector<float>& audio_buffer, int s
             }
         }
         
-        bool is_voice = has_voice;
+        // 计算当前音频段的能量
+        float current_energy = calculateEnergy(audio_buffer);
         
-        // 保留状态机逻辑，增强稳定性
+        // 自适应背景噪音检测
+        if (adaptive_mode) {
+            // 如果当前能量很低，可能是背景噪音
+            if (current_energy < energy_threshold) {
+                background_frames_count++;
+                background_energy = (background_energy * (background_frames_count - 1) + current_energy) / background_frames_count;
+                
+                // 动态调整能量阈值
+                if (background_frames_count > 50) { // 积累足够的背景噪音样本
+                    energy_threshold = std::max(0.0001f, background_energy * 2.0f); // 阈值设为背景噪音的2倍
+                }
+            }
+        }
+        
+        // 结合WebRTC VAD和能量检测的结果
+        bool energy_indicates_voice = (current_energy > energy_threshold);
+        bool is_voice = has_voice && energy_indicates_voice;
+        
+        // 记录状态变化前的状态
+        bool previous_state = last_voice_state;
+        
+        // 增强的状态机逻辑，更严格地判断语音
         if (is_voice) {
             silence_counter = 0;
             voice_counter++;
@@ -248,6 +271,22 @@ bool VoiceActivityDetector::detect(const std::vector<float>& audio_buffer, int s
             if (silence_counter > voice_hold_frames) {
                 last_voice_state = false;
             }
+        }
+        
+        // 只在状态发生变化时记录日志
+        frames_since_last_log++;
+        if (previous_state != last_voice_state) {
+            state_change_counter++;
+            std::cout << "[VAD] 状态变化 #" << state_change_counter 
+                      << ": " << (previous_state ? "语音" : "静音") 
+                      << " → " << (last_voice_state ? "语音" : "静音")
+                      << " (能量:" << std::fixed << std::setprecision(4) << current_energy
+                      << ", 阈值:" << energy_threshold
+                      << ", WebRTC:" << (has_voice ? "语音" : "静音")
+                      << ", 帧间隔:" << frames_since_last_log << ")" << std::endl;
+            
+            last_logged_state = last_voice_state;
+            frames_since_last_log = 0;
         }
         
         // 更新语音结束检测
@@ -317,7 +356,7 @@ int VoiceActivityDetector::getVADMode() const {
 
 // 重置VAD状态 - 优化不再销毁重建VAD实例
 void VoiceActivityDetector::reset() {
-    std::cout << "[VAD] 重置VAD状态..." << std::endl;
+    std::cout << "[VAD] 重置状态 (保留实例)" << std::endl;
     
     try {
         // 重置状态变量
@@ -332,33 +371,35 @@ void VoiceActivityDetector::reset() {
         silence_frames_count = 0;
         speech_ended = false;
         
+        // 重置日志相关变量
+        last_logged_state = false;
+        state_change_counter = 0;
+        frames_since_last_log = 0;
+        
         // 清理缓冲区
         int16_buffer.clear();
         
         // 仅重置VAD模式和采样率，不销毁重建实例
         if (vad_instance) {
-            std::cout << "[VAD] 重置现有VAD实例配置..." << std::endl;
+            // 重新设置VAD参数（静默重置）
+            bool mode_ok = (fvad_set_mode(vad_instance, vad_mode) >= 0);
+            bool rate_ok = (fvad_set_sample_rate(vad_instance, 16000) >= 0);
             
-            // 重新设置VAD参数
-            if (fvad_set_mode(vad_instance, vad_mode) < 0) {
-                std::cerr << "[VAD] 重置VAD模式失败" << std::endl;
+            if (!mode_ok || !rate_ok) {
+                std::cerr << "[VAD] 配置重置失败 (模式:" << (mode_ok ? "✓" : "✗") 
+                          << ", 采样率:" << (rate_ok ? "✓" : "✗") << ")" << std::endl;
             }
-            
-            if (fvad_set_sample_rate(vad_instance, 16000) < 0) {
-                std::cerr << "[VAD] 重置采样率失败" << std::endl;
-            }
-            
-            std::cout << "[VAD] VAD实例配置重置完成" << std::endl;
             
         } else {
-            std::cout << "[VAD] 警告：VAD实例无效，尝试重新创建..." << std::endl;
+            std::cout << "[VAD] ⚠️ VAD实例无效，重新创建..." << std::endl;
             
             // 只有在实例确实无效时才重新创建
             vad_instance = safeCreateVADInstance();
             if (vad_instance) {
-                if (fvad_set_mode(vad_instance, vad_mode) >= 0 && 
-                    fvad_set_sample_rate(vad_instance, 16000) >= 0) {
-                    std::cout << "[VAD] VAD实例重新创建成功" << std::endl;
+                bool config_ok = (fvad_set_mode(vad_instance, vad_mode) >= 0 && 
+                                 fvad_set_sample_rate(vad_instance, 16000) >= 0);
+                if (config_ok) {
+                    std::cout << "[VAD] VAD实例重新创建成功 ✓" << std::endl;
                 } else {
                     std::cerr << "[VAD] VAD实例配置失败，释放实例" << std::endl;
                     fvad_free(vad_instance);
@@ -369,7 +410,7 @@ void VoiceActivityDetector::reset() {
             }
         }
         
-        std::cout << "[VAD] VAD状态重置完成" << std::endl;
+        // 重置完成（静默）
         
     } catch (const std::exception& e) {
         std::cerr << "[VAD] 重置异常: " << e.what() << std::endl;
@@ -527,15 +568,19 @@ bool VoiceActivityDetector::updateVoiceState(bool is_silence) {
             
             if (enough_total_voice && has_recent_voice && enough_silence) {
                 speech_ended = true;
-                std::cout << "检测到语音结束:连续" << silence_frames_count 
-                          << "帧静音,历史中有" << voice_frames << "帧语音(最近" 
-                          << recent_voice_frames << "帧语音)" << std::endl;
+                std::cout << "[VAD] 🎯 智能分段触发: 连续" << silence_frames_count 
+                          << "帧静音, 历史语音帧:" << voice_frames 
+                          << " (最近:" << recent_voice_frames << ")" << std::endl;
             } else {
-                // 记录为什么没有标记为语音结束
-                if (!enough_total_voice) {
-                    std::cout << "语音帧数不足(" << voice_frames << "/10)，不标记语音结束" << std::endl;
-                } else if (!has_recent_voice) {
-                    std::cout << "最近语音帧数不足(" << recent_voice_frames << "/2)，不标记语音结束" << std::endl;
+                // 只在调试模式下记录详细信息，或者每100帧记录一次避免日志过多
+                static int debug_counter = 0;
+                debug_counter++;
+                if (debug_counter % 100 == 0) {  // 每100帧记录一次
+                    if (!enough_total_voice) {
+                        std::cout << "[VAD] 语音帧不足(" << voice_frames << "/10)，等待更多语音" << std::endl;
+                    } else if (!has_recent_voice) {
+                        std::cout << "[VAD] 最近语音帧不足(" << recent_voice_frames << "/2)，等待更多语音" << std::endl;
+                    }
                 }
                 // 适当减少静音计数，给后续语音更多机会
                 silence_frames_count = std::max(0, static_cast<int>(silence_frames_count) - 2);
@@ -551,7 +596,7 @@ bool VoiceActivityDetector::updateVoiceState(bool is_silence) {
 
 // 静态方法：检查VAD库状态
 bool VoiceActivityDetector::checkVADLibraryState() {
-    std::cout << "[VAD] 检查VAD库状态..." << std::endl;
+    // 静默检查VAD库状态
     
     try {
         // 尝试创建一个临时VAD实例来验证库状态
@@ -565,7 +610,10 @@ bool VoiceActivityDetector::checkVADLibraryState() {
             fvad_free(test_instance);
             
             bool success = (mode_result >= 0 && sample_rate_result >= 0);
-            std::cout << "[VAD] VAD库状态检查" << (success ? "通过" : "失败") << std::endl;
+            // 只在失败时输出日志
+            if (!success) {
+                std::cerr << "[VAD] VAD库状态检查失败" << std::endl;
+            }
             return success;
             
         } else {
@@ -585,7 +633,7 @@ bool VoiceActivityDetector::checkVADLibraryState() {
 
 // 安全创建VAD实例的静态方法
 Fvad* VoiceActivityDetector::safeCreateVADInstance() {
-    std::cout << "[VAD] 开始安全创建VAD实例..." << std::endl;
+    // 静默创建VAD实例
     
     try {
         // 预检查VAD库状态
@@ -597,15 +645,18 @@ Fvad* VoiceActivityDetector::safeCreateVADInstance() {
         // 尝试创建实例，带重试机制
         const int max_retries = 3;
         for (int retry = 0; retry < max_retries; retry++) {
-            std::cout << "[VAD] 创建尝试 " << (retry + 1) << "/" << max_retries << std::endl;
+            if (retry > 0) {  // 只在重试时显示日志
+                std::cout << "[VAD] 创建重试 " << retry + 1 << "/" << max_retries << std::endl;
+            }
             
             Fvad* instance = fvad_new();
             if (instance) {
-                std::cout << "[VAD] VAD实例创建成功，地址: " << instance << std::endl;
-                return instance;
+                return instance;  // 成功创建，静默返回
             }
             
-            std::cerr << "[VAD] 第 " << (retry + 1) << " 次创建失败" << std::endl;
+            if (retry > 0) {  // 只在重试时显示失败日志
+                std::cerr << "[VAD] 第 " << (retry + 1) << " 次创建失败" << std::endl;
+            }
             
             if (retry < max_retries - 1) {
                 // 等待一段时间后重试
@@ -657,4 +708,44 @@ bool VoiceActivityDetector::isVADInitialized() const {
         std::cerr << "[VAD] VAD实例测试未知异常" << std::endl;
         return false;
     }
-} 
+}
+
+// 高级VAD调优方法实现
+void VoiceActivityDetector::setMinVoiceFrames(int frames) {
+    int old_value = min_voice_frames;
+    min_voice_frames = std::max(1, frames);
+    if (old_value != min_voice_frames) {
+        std::cout << "[VAD] 最小语音帧数: " << old_value << " → " << min_voice_frames << std::endl;
+    }
+}
+
+void VoiceActivityDetector::setVoiceHoldFrames(int frames) {
+    int old_value = voice_hold_frames;
+    voice_hold_frames = std::max(1, frames);
+    if (old_value != voice_hold_frames) {
+        std::cout << "[VAD] 语音保持帧数: " << old_value << " → " << voice_hold_frames << std::endl;
+    }
+}
+
+void VoiceActivityDetector::setEnergyThreshold(float threshold) {
+    float old_value = energy_threshold;
+    energy_threshold = std::clamp(threshold, 0.0001f, 1.0f);
+    if (std::abs(old_value - energy_threshold) > 0.0001f) {
+        std::cout << "[VAD] 能量阈值: " << std::fixed << std::setprecision(4) 
+                  << old_value << " → " << energy_threshold << std::endl;
+    }
+}
+
+void VoiceActivityDetector::setAdaptiveMode(bool enable) {
+    if (adaptive_mode != enable) {
+        adaptive_mode = enable;
+        if (enable) {
+            // 重置背景噪音统计
+            background_energy = 0.0f;
+            background_frames_count = 0;
+            std::cout << "[VAD] 自适应模式: 禁用 → 启用" << std::endl;
+        } else {
+            std::cout << "[VAD] 自适应模式: 启用 → 禁用" << std::endl;
+        }
+    }
+}

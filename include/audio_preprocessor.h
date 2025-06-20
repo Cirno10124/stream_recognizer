@@ -131,4 +131,9 @@ private:
     void mixAudioBuffers(std::vector<float>& processed, const std::vector<float>& original, float mix_ratio);
     float calculateSignalToNoiseRatio(const std::vector<float>& buffer);
     bool isSignalBelowVADThreshold(const std::vector<float>& buffer);
+    
+    // 日志优化相关变量
+    mutable int log_counter = 0;           // 日志计数器
+    mutable float last_logged_rms = 0.0f;  // 上次记录的RMS值
+    mutable bool last_processing_state = false; // 上次处理状态
 }; 

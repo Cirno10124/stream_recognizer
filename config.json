@@ -8,7 +8,15 @@
         "segment_overlap_ms": 1000,
         "segment_size_ms": 3500,
         "step_ms": 3000,
-        "vad_threshold": 0.15
+        "vad_advanced": {
+            "adaptive_mode": true,
+            "energy_threshold": 0.04,
+            "min_voice_frames": 5,
+            "mode": 1,
+            "silence_duration_ms": 800,
+            "voice_hold_frames": 15
+        },
+        "vad_threshold": 0.04
     },
     "gui": {
         "correction_controls": {
@@ -62,7 +70,7 @@
             "enabled": true,
             "model_path": "models/ggml-base.bin",
             "use_gpu": true,
-            "vad_threshold": 0.15
+            "vad_threshold": 0.04
         },
         "openai_mode": {
             "correction": {
@@ -86,6 +94,6 @@
             "server_url": "http://localhost:8080"
         },
         "target_language": "en",
-        "vad_threshold": 0.15
+        "vad_threshold": 0.04
     }
 }
