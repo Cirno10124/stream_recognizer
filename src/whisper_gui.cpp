@@ -2677,3 +2677,52 @@ void WhisperGUI::onCorrectionStatusUpdated(const QString& status) {
     // 同时在日志中记录
     appendLogMessage(QString("Correction status: %1").arg(status));
 }
+
+// 实现缺失的方法
+void WhisperGUI::appendResult(const QString& text) {
+    if (text.isEmpty()) return;
+    
+    // 将结果添加到主输出区域
+    if (finalOutput) {
+        finalOutput->append(text);
+        // 滚动到底部
+        QTextCursor cursor = finalOutput->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        finalOutput->setTextCursor(cursor);
+    }
+}
+
+void WhisperGUI::appendFinalResult(const QString& text) {
+    if (text.isEmpty()) return;
+    
+    // 将最终结果添加到输出区域，可能需要特殊格式
+    if (finalOutput) {
+        // 添加时间戳
+        QString timestamp = QTime::currentTime().toString("hh:mm:ss");
+        QString formattedText = QString("[%1] %2").arg(timestamp, text);
+        
+        finalOutput->append(formattedText);
+        // 滚动到底部
+        QTextCursor cursor = finalOutput->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        finalOutput->setTextCursor(cursor);
+    }
+}
+
+void WhisperGUI::appendOpenAIOutput(const QString& text) {
+    if (text.isEmpty()) return;
+    
+    // 将OpenAI结果添加到专门的输出区域
+    // 如果有专门的OpenAI输出区域，使用它；否则使用主输出区域
+    if (finalOutput) {
+        // 添加OpenAI标识和时间戳
+        QString timestamp = QTime::currentTime().toString("hh:mm:ss");
+        QString formattedText = QString("[%1][OpenAI] %2").arg(timestamp, text);
+        
+        finalOutput->append(formattedText);
+        // 滚动到底部
+        QTextCursor cursor = finalOutput->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        finalOutput->setTextCursor(cursor);
+    }
+}

@@ -13,7 +13,8 @@ extern "C" {
 #pragma comment(lib, "fvad.lib")
 
 // 构造函数，初始化VAD参数
-VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
+VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent, 
+                                           VADType vad_type, const std::string& silero_model_path)
     : QObject(parent)
     , threshold(threshold)
     , last_voice_state(false)
@@ -22,13 +23,16 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
     , average_energy(0.0f)
     , silence_counter(0)
     , voice_counter(0)
-    , min_voice_frames(5)     // 增加至5帧，减少对短暂噪音的误判
-    , voice_hold_frames(15)    // 增加保持帧数，让VAD更严格地确认语音结束
-    , vad_mode(1)             // 默认使用质量模式，更好地过滤噪音
+    , min_voice_frames(3)     // 调整为3帧（60ms），平衡灵敏度和稳定性
+    , voice_hold_frames(8)     // 调整为8帧（160ms），适中的语音保持时长
+    , vad_mode(2)             // 使用更严格的模式2，更好地过滤噪音
     , vad_instance(nullptr)
     , silence_frames_count(0)
-    , required_silence_frames(12) // 增加至0.8秒 (12帧 * 30ms/帧)，更严格的静音检测
+    , required_silence_frames(12) // 调整为240ms (12帧 * 20ms/帧)，适中的静音检测时长
     , speech_ended(false)
+    , vad_type_(vad_type)
+    , silero_vad_(nullptr)
+    , silero_model_path_(silero_model_path)
 {
     // 初始化静音历史
     silence_history.clear();
@@ -56,7 +60,7 @@ VoiceActivityDetector::VoiceActivityDetector(float threshold, QObject* parent)
             }
             
             if (!vad_instance) {
-            vad_instance = safeCreateVADInstance();
+                vad_instance = VoiceActivityDetector::safeCreateVADInstance();
             }
             
             if (vad_instance) {
@@ -167,6 +171,14 @@ VoiceActivityDetector::~VoiceActivityDetector() {
         // 清理其他资源
         silence_history.clear();
         
+        // 清理Silero VAD资源（如果存在）
+        if (silero_vad_) {
+            // 这里需要实际的SileroVADDetector类实现时再添加删除逻辑
+            // delete silero_vad_;
+            silero_vad_ = nullptr;
+            std::cout << "[VAD] Silero VAD资源已清理" << std::endl;
+        }
+        
         std::cout << "[VAD] VAD析构完成" << std::endl;
         
     } catch (const std::exception& e) {
@@ -203,16 +215,19 @@ bool VoiceActivityDetector::detect(const std::vector<float>& audio_buffer, int s
             int16_buffer[i] = static_cast<int16_t>(sample * 32767.0f);
         }
         
-        // 固定使用320个样本(20ms@16kHz)作为WebRTC VAD的处理单位
-        const int samples_per_frame = 320; // 20ms@16kHz
+        // 固定使用160个样本(10ms@16kHz)作为WebRTC VAD的处理单位，提供更精细的检测
+        const int samples_per_frame = 160; // 10ms@16kHz
         
         // 如果缓冲区太小，保持上一状态
         if (int16_buffer.size() < samples_per_frame) {
             return last_voice_state;
         }
         
-        // 处理整个音频缓冲区，而不是只处理前320个样本
-        bool has_voice = false;
+        // 改进的多帧投票机制：统计所有子帧的语音检测结果
+        std::vector<bool> frame_results;
+        int total_frames = 0;
+        int voice_frames = 0;
+        
         for (size_t offset = 0; offset + samples_per_frame <= int16_buffer.size(); offset += samples_per_frame) {
             // 安全检查VAD实例
             if (!vad_instance) {
@@ -221,12 +236,33 @@ bool VoiceActivityDetector::detect(const std::vector<float>& audio_buffer, int s
             }
             
             int vad_result = fvad_process(vad_instance, int16_buffer.data() + offset, samples_per_frame);
-            if (vad_result > 0) {
-                has_voice = true;
-                break; // 找到语音即可退出，提高效率
-            } else if (vad_result < 0) {
+            if (vad_result < 0) {
                 std::cerr << "[VAD] fvad_process返回错误: " << vad_result << std::endl;
                 return last_voice_state;
+            }
+            
+            bool is_voice_frame = (vad_result > 0);
+            frame_results.push_back(is_voice_frame);
+            total_frames++;
+            if (is_voice_frame) {
+                voice_frames++;
+            }
+        }
+        
+        // 智能投票决策：60%静音帧才认为整段为静音
+        bool has_voice = false;
+        if (total_frames > 0) {
+            float voice_ratio = static_cast<float>(voice_frames) / total_frames;
+            float silence_ratio = 1.0f - voice_ratio;
+            
+            // 如果静音帧比例 >= 60%，则认为整段为静音；否则认为有语音
+            has_voice = (silence_ratio < 0.6f);
+            
+            // 调试信息（仅在状态可能变化时输出）
+            if ((has_voice != last_voice_state) || (frames_since_last_log > 100)) {
+                std::cout << "[VAD] 帧投票结果: " << voice_frames << "/" << total_frames 
+                          << " (语音率:" << std::fixed << std::setprecision(1) << (voice_ratio * 100) << "%"
+                          << ", 决策:" << (has_voice ? "语音" : "静音") << ")" << std::endl;
             }
         }
         
@@ -247,30 +283,41 @@ bool VoiceActivityDetector::detect(const std::vector<float>& audio_buffer, int s
             }
         }
         
-        // 结合WebRTC VAD和能量检测的结果
-        bool energy_indicates_voice = (current_energy > energy_threshold);
-        bool is_voice = has_voice && energy_indicates_voice;
+        // 使用多层验证进行更精确的语音检测
+        bool basic_detection = isRealVoice(audio_buffer, has_voice, current_energy);
         
         // 记录状态变化前的状态
         bool previous_state = last_voice_state;
         
-        // 增强的状态机逻辑，更严格地判断语音
-        if (is_voice) {
-            silence_counter = 0;
+        // 改进的状态机逻辑，更严格地判断语音
+        if (basic_detection) {
+            // 检测到潜在语音
             voice_counter++;
+            silence_counter = std::max(0, silence_counter - 1); // 逐渐减少静音计数
             
-            // 连续检测到语音帧超过最小帧数，标记为语音状态
+            // 只有连续多帧都检测到语音才认为是真正的语音
             if (voice_counter >= min_voice_frames) {
-                last_voice_state = true;
+                // 额外验证：检查能量是否明显高于背景噪音
+                if (adaptive_mode && background_frames_count > 10) {
+                    if (current_energy > background_energy * 3.0f) {
+                        last_voice_state = true;
+                    }
+                    // 否则保持当前状态，不强制改变
+                } else {
+                    // 非自适应模式或背景噪音数据不足时的简单判断
+                    last_voice_state = true;
+                }
             }
         } else {
+            // 检测到静音
             silence_counter++;
-            voice_counter = 0;
+            voice_counter = std::max(0, voice_counter - 2); // 更快地减少语音计数
             
-            // 静音状态持续超过保持帧数，标记为非语音状态
-            if (silence_counter > voice_hold_frames) {
+            // 连续静音足够长时间才切换到静音状态
+            if (silence_counter >= voice_hold_frames) {
                 last_voice_state = false;
             }
+            // 否则保持上一状态
         }
         
         // 只在状态发生变化时记录日志
@@ -289,9 +336,9 @@ bool VoiceActivityDetector::detect(const std::vector<float>& audio_buffer, int s
             frames_since_last_log = 0;
         }
         
-        // 更新语音结束检测
-        is_voice = !last_voice_state;
-        updateVoiceState(is_voice);
+        // 更新语音结束检测 - 修正逻辑
+        bool is_silence = !last_voice_state;
+        updateVoiceState(is_silence);
         
         return last_voice_state;
         
@@ -394,7 +441,7 @@ void VoiceActivityDetector::reset() {
             std::cout << "[VAD] ⚠️ VAD实例无效，重新创建..." << std::endl;
             
             // 只有在实例确实无效时才重新创建
-            vad_instance = safeCreateVADInstance();
+            vad_instance = VoiceActivityDetector::safeCreateVADInstance();
             if (vad_instance) {
                 bool config_ok = (fvad_set_mode(vad_instance, vad_mode) >= 0 && 
                                  fvad_set_sample_rate(vad_instance, 16000) >= 0);
@@ -460,8 +507,8 @@ bool VoiceActivityDetector::process(AudioBuffer& audio_buffer, float threshold) 
         pcm_data.push_back(pcm_sample);
     }
     
-    // 固定使用320个样本(20ms@16kHz)作为WebRTC VAD的处理单位
-    const int frame_size = 320;  // 20ms @ 16kHz
+    // 固定使用160个样本(10ms@16kHz)作为WebRTC VAD的处理单位，提供更精细的检测
+    const int frame_size = 160;  // 10ms @ 16kHz
     int num_frames = static_cast<int>(pcm_data.size() / frame_size);
     
     // 将整个缓冲区划分为多个帧，分别处理
@@ -503,21 +550,21 @@ bool VoiceActivityDetector::process(AudioBuffer& audio_buffer, float threshold) 
 
 // 设置语音结束检测的静音时长(毫秒)
 void VoiceActivityDetector::setSilenceDuration(size_t silence_ms) {
-    // 计算对应的帧数 (假设帧长为20ms，而不是之前的50ms)
+    // 计算对应的帧数 (使用20ms作为基准帧长度，因为检测逻辑以20ms为单位)
     required_silence_frames = silence_ms / 20;
     
-    // 确保至少有5帧，提供更好的容错性
-    if (required_silence_frames < 5) {
-        required_silence_frames = 5;
+    // 确保至少有3帧(60ms)，提供合理的最小静音检测时长
+    if (required_silence_frames < 3) {
+        required_silence_frames = 3;
     }
     
-    // 增加最大限制，避免过长的静音检测
-    if (required_silence_frames > 100) { // 最多2秒
-        required_silence_frames = 100;
+    // 增加最大限制，避免过长的静音检测 (最多1秒)
+    if (required_silence_frames > 50) {
+        required_silence_frames = 50;
     }
     
-    std::cout << "语音结束检测:设置连续静音时长为" << silence_ms 
-              << "ms (" << required_silence_frames << "帧，调整后更保守)" << std::endl;
+    std::cout << "[VAD] 设置静音检测时长: " << silence_ms 
+              << "ms (" << required_silence_frames << "帧)" << std::endl;
 }
 
 // 重置语音结束检测状态
@@ -748,4 +795,98 @@ void VoiceActivityDetector::setAdaptiveMode(bool enable) {
             std::cout << "[VAD] 自适应模式: 启用 → 禁用" << std::endl;
         }
     }
+}
+
+// 多层验证是否为真实语音
+bool VoiceActivityDetector::isRealVoice(const std::vector<float>& audio_frame, bool webrtc_result, float energy) {
+    if (!webrtc_result) return false;
+    
+    // 1. 能量检查 - 必须高于阈值
+    if (energy < energy_threshold) return false;
+    
+    // 2. 动态范围检查 - 语音应该有一定的动态范围
+    float max_val = *std::max_element(audio_frame.begin(), audio_frame.end());
+    float min_val = *std::min_element(audio_frame.begin(), audio_frame.end());
+    float dynamic_range = max_val - min_val;
+    if (dynamic_range < 0.005f) return false; // 动态范围太小，可能是低频噪音
+    
+    // 3. 过零率检查 - 语音通常有适中的过零率
+    int zero_crossings = 0;
+    for (size_t i = 1; i < audio_frame.size(); i++) {
+        if ((audio_frame[i] >= 0) != (audio_frame[i-1] >= 0)) {
+            zero_crossings++;
+        }
+    }
+    float zcr = (float)zero_crossings / audio_frame.size();
+    // 过零率应该在合理范围内：不能太高（噪音）也不能太低（直流或低频）
+    if (zcr > 0.4f || zcr < 0.005f) return false;
+    
+    // 4. 如果启用自适应模式，检查是否明显高于背景噪音
+    if (adaptive_mode && background_frames_count > 5) {
+        if (energy < background_energy * 2.5f) return false;
+    }
+    
+    return true;
+}
+
+// VAD类型相关方法实现
+void VoiceActivityDetector::setVADType(VADType type) {
+    vad_type_ = type;
+    
+    // 根据VAD类型进行相应的初始化
+    switch (type) {
+        case VADType::Silero:
+            // 如果设置了Silero模型路径，初始化Silero VAD
+            if (!silero_model_path_.empty() && !silero_vad_) {
+                // 这里需要实际的SileroVADDetector类实现
+                // silero_vad_ = new SileroVADDetector(silero_model_path_);
+                std::cout << "[VAD] Silero VAD模式已设置，但需要实现SileroVADDetector类" << std::endl;
+            }
+            break;
+        case VADType::Hybrid:
+            std::cout << "[VAD] 混合VAD模式已设置" << std::endl;
+            break;
+        case VADType::WebRTC:
+        default:
+            std::cout << "[VAD] WebRTC VAD模式已设置" << std::endl;
+            break;
+    }
+}
+
+bool VoiceActivityDetector::setSileroModelPath(const std::string& model_path) {
+    silero_model_path_ = model_path;
+    
+    // 如果当前使用Silero VAD，重新初始化
+    if (vad_type_ == VADType::Silero || vad_type_ == VADType::Hybrid) {
+        // 清理旧的实例
+        if (silero_vad_) {
+            // delete silero_vad_;
+            silero_vad_ = nullptr;
+        }
+        
+        // 这里需要实际的SileroVADDetector类实现
+        // silero_vad_ = new SileroVADDetector(model_path);
+        // return silero_vad_ && silero_vad_->initialize();
+        std::cout << "[VAD] Silero模型路径已设置: " << model_path << std::endl;
+        return true; // 临时返回true，等待实际实现
+    }
+    
+    return true;
+}
+
+float VoiceActivityDetector::getSileroVADProbability(const std::vector<float>& audio_buffer) {
+    if (vad_type_ != VADType::Silero && vad_type_ != VADType::Hybrid) {
+        return 0.0f; // 不是Silero模式，返回0
+    }
+    
+    if (!silero_vad_) {
+        return 0.0f; // Silero VAD未初始化
+    }
+    
+    // 这里需要实际的SileroVADDetector类实现
+    // return silero_vad_->detectVoiceActivity(audio_buffer);
+    
+    // 临时实现：返回固定值
+    std::cout << "[VAD] getSileroVADProbability调用，但需要实现SileroVADDetector类" << std::endl;
+    return 0.5f; // 临时返回中等概率
 }
