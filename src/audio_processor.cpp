@@ -3076,7 +3076,7 @@ void AudioProcessor::onSegmentReady(const AudioSegment& segment) {
     size_t min_samples = 1600;  // 最小100ms的音频（16000Hz * 0.1s）
     if (audio_data.size() < min_samples) {
         LOG_INFO("音频段太短 (" + std::to_string(audio_data.size()) + " 样本，" + 
-                std::to_string(audio_data.size() * 1000.0f / 16000) + "ms)，跳过处理");
+                std::to_string(audio_data.size() * 1000.0f / 16000) + "ms), 跳过处理");
         
         // 如果是最后一段，即使太短也要启动延迟处理
         if (segment.is_last) {
@@ -3998,6 +3998,9 @@ void AudioProcessor::initializeParameters() {
     current_language = config.getLanguage();
     target_language = config.getTargetLanguage();
     dual_language = config.getDualLanguage();
+    
+    // 初始化文件路径变量
+    current_file_path.clear();  // 确保字符串初始化为空
     
     // 设置处理模式
     fast_mode = config.getFastMode();
@@ -6108,9 +6111,6 @@ void AudioProcessor::processAudioDataByMode(const std::vector<float>& audio_data
     
     std::string input_mode_name;
     switch (current_input_mode) {
-        case InputMode::MICROPHONE:
-            input_mode_name = "Microphone";
-            break;
         case InputMode::AUDIO_FILE:
             input_mode_name = "Audio File";
             break;
@@ -8063,6 +8063,12 @@ void AudioProcessor::globalCUDACleanup() {
     LOG_INFO("全局CUDA清理完成");
 }
 
+// 获取源语言设置
+std::string AudioProcessor::getSourceLanguage() const {
+    return current_language;
+}
 
-
-
+// 获取输入文件路径
+std::string AudioProcessor::getInputFile() const {
+    return current_file_path;
+}

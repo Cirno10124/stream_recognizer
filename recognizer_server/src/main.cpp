@@ -12,8 +12,372 @@
 #include <signal.h>
 #include <atomic>
 #include <httplib.h>
+#include <future>
+#include <queue>
+#include <unordered_map>
+#include <condition_variable>
+#include <tuple>
 
 using json = nlohmann::json;
+
+// 多路识别任务结构体
+struct AsyncRecognitionTask {
+    std::string task_id;
+    std::string channel_id;
+    std::string audio_path;
+    RecognitionParams params;
+    std::promise<RecognitionResult> promise;
+    std::chrono::system_clock::time_point submit_time;
+    int priority = 0;
+};
+
+// 通道状态枚举
+enum class ChannelStatus {
+    IDLE,
+    BUSY,
+    ERROR,
+    SHUTDOWN
+};
+
+// 通道信息结构体
+struct ChannelInfo {
+    std::string channel_id;
+    ChannelStatus status = ChannelStatus::IDLE;
+    std::string current_task_id;
+    std::chrono::system_clock::time_point last_activity;
+    std::shared_ptr<RecognitionService> recognition_service;
+    std::thread worker_thread;
+    std::atomic<bool> should_stop{false};
+    int processed_tasks = 0;
+    long long total_processing_time_ms = 0;
+    int error_count = 0;
+};
+
+// 简单的多路识别管理器
+class SimpleMultiChannelManager {
+public:
+    SimpleMultiChannelManager(int channel_count, const std::string& model_path)
+        : channel_count_(channel_count), model_path_(model_path) {}
+    
+    ~SimpleMultiChannelManager() {
+        shutdown();
+    }
+    
+    bool initialize() {
+        if (is_initialized_) return true;
+        
+        std::cout << "初始化 " << channel_count_ << " 个识别通道..." << std::endl;
+        
+        for (int i = 0; i < channel_count_; i++) {
+            std::string channel_id = "channel_" + std::to_string(i);
+            initializeChannel(channel_id);
+        }
+        
+        is_initialized_ = true;
+        std::cout << "多路识别管理器初始化完成" << std::endl;
+        return true;
+    }
+    
+    std::string submitTask(const std::string& audio_path, const RecognitionParams& params, int priority = 0) {
+        if (is_shutdown_) return "";
+        
+        auto task = std::make_shared<AsyncRecognitionTask>();
+        task->task_id = generateTaskId();
+        task->audio_path = audio_path;
+        task->params = params;
+        task->submit_time = std::chrono::system_clock::now();
+        task->priority = priority;
+        
+        // 选择最空闲的通道
+        std::string selected_channel = selectBestChannel();
+        if (selected_channel.empty()) {
+            return "";
+        }
+        
+        task->channel_id = selected_channel;
+        
+        // 添加任务到全局列表
+        {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            all_tasks_[task->task_id] = task;
+        }
+        
+        // 添加到通道队列
+        {
+            std::lock_guard<std::mutex> lock(channel_queues_mutex_[selected_channel]);
+            channel_task_queues_[selected_channel].push(task);
+            channel_conditions_[selected_channel].notify_one();
+        }
+        
+        std::cout << "任务 " << task->task_id << " 提交到通道 " << selected_channel << std::endl;
+        return task->task_id;
+    }
+    
+    std::future<RecognitionResult> getTaskResult(const std::string& task_id) {
+        std::lock_guard<std::mutex> lock(tasks_mutex_);
+        auto it = all_tasks_.find(task_id);
+        if (it != all_tasks_.end()) {
+            return it->second->promise.get_future();
+        }
+        
+        std::promise<RecognitionResult> promise;
+        RecognitionResult result;
+        result.success = false;
+        result.error_message = "任务不存在: " + task_id;
+        promise.set_value(result);
+        return promise.get_future();
+    }
+    
+    json getStatus() {
+        json status;
+        status["total_channels"] = channel_count_;
+        status["channels"] = json::array();
+        
+        std::lock_guard<std::mutex> lock(channels_mutex_);
+        for (const auto& [channel_id, channel] : channels_) {
+            json channel_status;
+            channel_status["channel_id"] = channel_id;
+            channel_status["status"] = static_cast<int>(channel->status);
+            channel_status["current_task"] = channel->current_task_id;
+            channel_status["processed_tasks"] = channel->processed_tasks;
+            channel_status["error_count"] = channel->error_count;
+            
+            int pending_tasks = 0;
+            {
+                std::lock_guard<std::mutex> queue_lock(channel_queues_mutex_[channel_id]);
+                pending_tasks = channel_task_queues_[channel_id].size();
+            }
+            channel_status["pending_tasks"] = pending_tasks;
+            
+            status["channels"].push_back(channel_status);
+        }
+        
+        return status;
+    }
+    
+    void shutdown() {
+        if (is_shutdown_) return;
+        
+        std::cout << "关闭多路识别管理器..." << std::endl;
+        is_shutdown_ = true;
+        
+        // 停止所有通道
+        {
+            std::lock_guard<std::mutex> lock(channels_mutex_);
+            for (auto& [channel_id, channel] : channels_) {
+                channel->should_stop = true;
+                channel->status = ChannelStatus::SHUTDOWN;
+            }
+        }
+        
+        // 通知所有工作线程
+        for (auto& [channel_id, condition] : channel_conditions_) {
+            condition.notify_all();
+        }
+        
+        // 等待所有线程结束
+        {
+            std::lock_guard<std::mutex> lock(channels_mutex_);
+            for (auto& [channel_id, channel] : channels_) {
+                if (channel->worker_thread.joinable()) {
+                    channel->worker_thread.join();
+                }
+            }
+        }
+        
+        std::cout << "多路识别管理器已关闭" << std::endl;
+    }
+
+private:
+    int channel_count_;
+    std::string model_path_;
+    bool is_initialized_ = false;
+    std::atomic<bool> is_shutdown_{false};
+    std::atomic<long long> task_id_counter_{0};
+    
+    std::unordered_map<std::string, std::unique_ptr<ChannelInfo>> channels_;
+    std::mutex channels_mutex_;
+    
+    std::unordered_map<std::string, std::queue<std::shared_ptr<AsyncRecognitionTask>>> channel_task_queues_;
+    std::unordered_map<std::string, std::mutex> channel_queues_mutex_;
+    std::unordered_map<std::string, std::condition_variable> channel_conditions_;
+    
+    std::unordered_map<std::string, std::shared_ptr<AsyncRecognitionTask>> all_tasks_;
+    std::mutex tasks_mutex_;
+    
+    std::string generateTaskId() {
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        auto counter = task_id_counter_.fetch_add(1);
+        return "task_" + std::to_string(timestamp) + "_" + std::to_string(counter);
+    }
+    
+    void initializeChannel(const std::string& channel_id) {
+        auto channel = std::make_unique<ChannelInfo>();
+        channel->channel_id = channel_id;
+        channel->status = ChannelStatus::IDLE;
+        channel->last_activity = std::chrono::system_clock::now();
+        channel->recognition_service = std::make_shared<RecognitionService>(model_path_);
+        
+        if (!channel->recognition_service->initialize()) {
+            std::cerr << "通道 " << channel_id << " 初始化失败" << std::endl;
+            channel->status = ChannelStatus::ERROR;
+        }
+        
+        // 初始化队列和同步原语
+        channel_task_queues_[channel_id] = std::queue<std::shared_ptr<AsyncRecognitionTask>>();
+        channel_queues_mutex_.emplace(std::piecewise_construct,
+                                     std::forward_as_tuple(channel_id),
+                                     std::forward_as_tuple());
+        channel_conditions_.emplace(std::piecewise_construct,
+                                    std::forward_as_tuple(channel_id),
+                                    std::forward_as_tuple());
+        
+        // 启动工作线程
+        channel->worker_thread = std::thread(&SimpleMultiChannelManager::channelWorkerLoop, this, channel_id);
+        
+        {
+            std::lock_guard<std::mutex> lock(channels_mutex_);
+            channels_[channel_id] = std::move(channel);
+        }
+        
+        std::cout << "通道 " << channel_id << " 初始化完成" << std::endl;
+    }
+    
+    std::string selectBestChannel() {
+        std::lock_guard<std::mutex> lock(channels_mutex_);
+        
+        std::string best_channel;
+        int min_pending_tasks = INT_MAX;
+        
+        for (const auto& [channel_id, channel] : channels_) {
+            if (channel->status == ChannelStatus::IDLE || channel->status == ChannelStatus::BUSY) {
+                std::lock_guard<std::mutex> queue_lock(channel_queues_mutex_[channel_id]);
+                int pending_tasks = channel_task_queues_[channel_id].size();
+                
+                if (pending_tasks < min_pending_tasks) {
+                    min_pending_tasks = pending_tasks;
+                    best_channel = channel_id;
+                }
+            }
+        }
+        
+        return best_channel;
+    }
+    
+    void channelWorkerLoop(const std::string& channel_id) {
+        std::cout << "通道 " << channel_id << " 工作线程启动" << std::endl;
+        
+        ChannelInfo* channel_info = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(channels_mutex_);
+            auto it = channels_.find(channel_id);
+            if (it != channels_.end()) {
+                channel_info = it->second.get();
+            }
+        }
+        
+        if (!channel_info) return;
+        
+        while (!channel_info->should_stop && !is_shutdown_) {
+            std::shared_ptr<AsyncRecognitionTask> task;
+            
+            // 等待任务
+            {
+                std::unique_lock<std::mutex> lock(channel_queues_mutex_[channel_id]);
+                channel_conditions_[channel_id].wait(lock, [&]() {
+                    return !channel_task_queues_[channel_id].empty() || 
+                           channel_info->should_stop || is_shutdown_;
+                });
+                
+                if (channel_info->should_stop || is_shutdown_) break;
+                
+                if (!channel_task_queues_[channel_id].empty()) {
+                    task = channel_task_queues_[channel_id].front();
+                    channel_task_queues_[channel_id].pop();
+                }
+            }
+            
+            if (task) {
+                processTask(channel_info, task);
+            }
+        }
+        
+        std::cout << "通道 " << channel_id << " 工作线程退出" << std::endl;
+    }
+    
+    void processTask(ChannelInfo* channel_info, std::shared_ptr<AsyncRecognitionTask> task) {
+        channel_info->status = ChannelStatus::BUSY;
+        channel_info->current_task_id = task->task_id;
+        channel_info->last_activity = std::chrono::system_clock::now();
+        
+        std::cout << "通道 " << channel_info->channel_id << " 开始处理任务 " << task->task_id << std::endl;
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        try {
+            RecognitionResult result = channel_info->recognition_service->recognize(task->audio_path, task->params);
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto processing_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+            
+            result.processing_time_ms = processing_time;
+            
+            // 更新统计信息
+            channel_info->processed_tasks++;
+            channel_info->total_processing_time_ms += processing_time;
+            
+            if (!result.success) {
+                channel_info->error_count++;
+            }
+            
+            // 删除临时文件
+            try {
+                if (std::filesystem::exists(task->audio_path)) {
+                    std::filesystem::remove(task->audio_path);
+                    std::cout << "已删除临时文件: " << task->audio_path << std::endl;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "删除临时文件失败: " << e.what() << std::endl;
+            }
+            
+            task->promise.set_value(result);
+            
+            std::cout << "通道 " << channel_info->channel_id << " 完成任务 " << task->task_id 
+                      << "，耗时: " << processing_time << "ms" << std::endl;
+                      
+        } catch (const std::exception& e) {
+            channel_info->error_count++;
+            
+            RecognitionResult result;
+            result.success = false;
+            result.error_message = "处理任务时出错: " + std::string(e.what());
+            
+            // 删除临时文件
+            try {
+                if (std::filesystem::exists(task->audio_path)) {
+                    std::filesystem::remove(task->audio_path);
+                    std::cout << "已删除临时文件: " << task->audio_path << std::endl;
+                }
+            } catch (const std::exception& cleanup_e) {
+                std::cerr << "删除临时文件失败: " << cleanup_e.what() << std::endl;
+            }
+            
+            task->promise.set_value(result);
+            
+            std::cerr << "通道 " << channel_info->channel_id << " 处理任务出错: " << e.what() << std::endl;
+        }
+        
+        // 从全局任务列表中移除
+        {
+            std::lock_guard<std::mutex> lock(tasks_mutex_);
+            all_tasks_.erase(task->task_id);
+        }
+        
+        channel_info->status = ChannelStatus::IDLE;
+        channel_info->current_task_id.clear();
+    }
+};
 
 // 全局变量用于信号处理
 std::atomic<bool> server_running(true);
@@ -147,10 +511,15 @@ class HttpServer {
 public:
     HttpServer(const std::string& host, int port, 
                std::shared_ptr<RecognitionService> recognition_service,
-               std::shared_ptr<FileHandler> file_handler) 
+               std::shared_ptr<FileHandler> file_handler,
+               const std::string& model_path) 
         : host_(host), port_(port), 
           recognition_service_(recognition_service), 
-          file_handler_(file_handler) {}
+          file_handler_(file_handler) {
+        // 初始化多路识别管理器（10路）
+        multi_channel_manager_ = std::make_unique<SimpleMultiChannelManager>(10, model_path);
+        multi_channel_manager_->initialize();
+    }
     
     // 设置CORS头
     void setCorsHeaders(const json& cors) {
@@ -174,15 +543,22 @@ public:
         server.set_default_headers(headers);
         
         // 实现健康检查接口
-        server.Get("/health", [this](const httplib::Request& req, httplib::Response& res) {
+        server.Get("/health", [this](const httplib::Request& /*req*/, httplib::Response& res) {
             json response = {
                 {"status", "healthy"},
                 {"service", "recognition-server"},
                 {"uptime", getUptime()},
                 {"model", recognition_service_->getModelPath()},
-                {"initialized", recognition_service_->initialize()}
+                {"initialized", recognition_service_->initialize()},
+                {"multi_channel_status", multi_channel_manager_->getStatus()}
             };
             res.set_content(response.dump(), "application/json");
+        });
+        
+        // 获取多路识别状态（保留用于监控）
+        server.Get("/multi_channel_status", [this](const httplib::Request& /*req*/, httplib::Response& res) {
+            json status = multi_channel_manager_->getStatus();
+            res.set_content(status.dump(4), "application/json");
         });
         
         // 实现文件上传接口
@@ -332,9 +708,21 @@ public:
                     }
                     
                     std::cout << "开始执行识别..." << std::endl;
-                    // 执行识别
-                    auto result = recognition_service_->recognize(file_path, params);
-                    std::cout << "识别完成，结果: " << (result.success ? "成功" : "失败") << std::endl;
+                    // 使用多路识别管理器执行识别（自动负载均衡）
+                    std::cout << "通过多路识别管理器处理任务..." << std::endl;
+                    std::string task_id = multi_channel_manager_->submitTask(file_path, params, 0);
+                    
+                    RecognitionResult result;
+                    if (!task_id.empty()) {
+                        // 等待识别完成
+                        auto future = multi_channel_manager_->getTaskResult(task_id);
+                        result = future.get(); // 阻塞等待结果
+                        std::cout << "多路识别完成，结果: " << (result.success ? "成功" : "失败") << std::endl;
+                    } else {
+                        result.success = false;
+                        result.error_message = "无法提交任务到多路识别管理器";
+                        std::cout << "多路识别任务提交失败" << std::endl;
+                    }
                     if (result.success) {
                         std::cout << "识别文本: " << result.text << std::endl;
                     } else {
@@ -414,9 +802,21 @@ public:
                 
                 std::cout << "使用JSON参数执行识别，文件: " << file_path << std::endl;
                 
-                // 执行识别
-                auto result = recognition_service_->recognize(file_path, params);
-                std::cout << "识别完成，结果: " << (result.success ? "成功" : "失败") << std::endl;
+                // 使用多路识别管理器执行识别（自动负载均衡）
+                std::cout << "通过多路识别管理器处理任务..." << std::endl;
+                std::string task_id = multi_channel_manager_->submitTask(file_path, params, 0);
+                
+                RecognitionResult result;
+                if (!task_id.empty()) {
+                    // 等待识别完成
+                    auto future = multi_channel_manager_->getTaskResult(task_id);
+                    result = future.get(); // 阻塞等待结果
+                    std::cout << "多路识别完成，结果: " << (result.success ? "成功" : "失败") << std::endl;
+                } else {
+                    result.success = false;
+                    result.error_message = "无法提交任务到多路识别管理器";
+                    std::cout << "多路识别任务提交失败" << std::endl;
+                }
                 
                 // 返回结果
                 json response = {
@@ -518,6 +918,7 @@ private:
     std::map<std::string, std::string> cors_headers_;
     std::shared_ptr<RecognitionService> recognition_service_;
     std::shared_ptr<FileHandler> file_handler_;
+    std::unique_ptr<SimpleMultiChannelManager> multi_channel_manager_;
     std::chrono::system_clock::time_point start_time_ = std::chrono::system_clock::now();
     
     // 获取服务运行时间
@@ -587,7 +988,7 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(std::filesystem::path(config.log_file).parent_path());
         
         // 创建HTTP服务器
-        HttpServer server(config.host, config.port, recognition_service, file_handler);
+        HttpServer server(config.host, config.port, recognition_service, file_handler, config.model_path);
         server.setCorsHeaders(config.cors);
         
         // 启动服务器

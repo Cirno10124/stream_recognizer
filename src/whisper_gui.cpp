@@ -66,7 +66,8 @@ WhisperGUI::WhisperGUI(QWidget* parent)
       streamUrlLabel(nullptr),
       streamUrlEdit(nullptr),
       streamValidationProgress(nullptr),
-      streamStatusLabel(nullptr) {
+      streamStatusLabel(nullptr),
+      multiChannelMode(false) {
     
     // 设置命令行编码为UTF-8
     #ifdef _WIN32
@@ -426,6 +427,56 @@ void WhisperGUI::setupUI() {
     // 添加矫正布局到主布局
     mainLayout->addLayout(correctionControlsLayout);
     
+    // 多路识别控制区域
+    QHBoxLayout* multiChannelControlsLayout = new QHBoxLayout();
+    
+    // 创建多路识别控制组件
+    enableMultiChannelCheckBox = new QCheckBox("Multi-Channel Mode", this);
+    enableMultiChannelCheckBox->setToolTip("Enable multi-channel recognition for parallel processing");
+    
+    QLabel* channelCountLabel = new QLabel("Channels:", this);
+    channelCountSpinBox = new QSpinBox(this);
+    channelCountSpinBox->setRange(1, 10);
+    channelCountSpinBox->setValue(4);
+    channelCountSpinBox->setEnabled(false);
+    channelCountSpinBox->setToolTip("Number of parallel recognition channels (1-10)");
+    
+    submitTaskButton = new QPushButton("Submit Task", this);
+    submitTaskButton->setEnabled(false);
+    submitTaskButton->setToolTip("Submit a new recognition task to available channel");
+    
+    clearTasksButton = new QPushButton("Clear Tasks", this);
+    clearTasksButton->setEnabled(false);
+    clearTasksButton->setToolTip("Clear all pending tasks from all channels");
+    
+    pauseChannelsButton = new QPushButton("Pause All", this);
+    pauseChannelsButton->setEnabled(false);
+    pauseChannelsButton->setToolTip("Pause all recognition channels");
+    
+    resumeChannelsButton = new QPushButton("Resume All", this);
+    resumeChannelsButton->setEnabled(false);
+    resumeChannelsButton->setToolTip("Resume all paused channels");
+    
+    // 通道状态标签
+    channelStatusLabel = new QLabel("Multi-channel disabled", this);
+    channelStatusLabel->setStyleSheet("QLabel { color: gray; font-size: 10px; }");
+    channelStatusLabel->setMinimumWidth(200);
+    
+    // 组合多路识别控件到布局
+    multiChannelControlsLayout->addWidget(new QLabel("Multi-Channel:", this));
+    multiChannelControlsLayout->addWidget(enableMultiChannelCheckBox);
+    multiChannelControlsLayout->addWidget(channelCountLabel);
+    multiChannelControlsLayout->addWidget(channelCountSpinBox);
+    multiChannelControlsLayout->addWidget(submitTaskButton);
+    multiChannelControlsLayout->addWidget(clearTasksButton);
+    multiChannelControlsLayout->addWidget(pauseChannelsButton);
+    multiChannelControlsLayout->addWidget(resumeChannelsButton);
+    multiChannelControlsLayout->addWidget(channelStatusLabel);
+    multiChannelControlsLayout->addStretch();
+    
+    // 添加多路识别布局到主布局
+    mainLayout->addLayout(multiChannelControlsLayout);
+    
     // 创建两列输出布局
     QHBoxLayout* contentLayout = new QHBoxLayout();
     
@@ -440,8 +491,18 @@ void WhisperGUI::setupUI() {
     finalOutput->setFont(textFont);
     finalOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
     
-    outputLayout->addWidget(new QLabel("Output:", this));
+    outputLayout->addWidget(new QLabel("Single Channel Output:", this));
     outputLayout->addWidget(finalOutput);
+    
+    // 多路识别输出区域
+    multiChannelOutput = new QTextEdit(this);
+    multiChannelOutput->setReadOnly(true);
+    multiChannelOutput->setFont(textFont);
+    multiChannelOutput->document()->setDefaultStyleSheet("span { line-height: 120%; }");
+    multiChannelOutput->setVisible(false);  // 默认隐藏
+    
+    outputLayout->addWidget(new QLabel("Multi-Channel Output:", this));
+    outputLayout->addWidget(multiChannelOutput);
     
     // 右侧：日志区域
     QVBoxLayout* logLayout = new QVBoxLayout();
@@ -596,6 +657,14 @@ void WhisperGUI::setupConnections() {
     connect(audioProcessor, &AudioProcessor::correctionEnabledChanged, this, &WhisperGUI::onCorrectionEnabledChanged);
     connect(audioProcessor, &AudioProcessor::lineCorrectionEnabledChanged, this, &WhisperGUI::onLineCorrectionEnabledChanged);
     connect(audioProcessor, &AudioProcessor::correctionStatusUpdated, this, &WhisperGUI::onCorrectionStatusUpdated);
+    
+    // 连接多路识别控制信号
+    connect(enableMultiChannelCheckBox, &QCheckBox::toggled, this, &WhisperGUI::onMultiChannelModeToggled);
+    connect(channelCountSpinBox, QOverload<int>::of(&QSpinBox::valueChanged), this, &WhisperGUI::onChannelCountChanged);
+    connect(submitTaskButton, &QPushButton::clicked, this, &WhisperGUI::onSubmitMultiChannelTask);
+    connect(clearTasksButton, &QPushButton::clicked, this, &WhisperGUI::onClearAllChannelTasks);
+    connect(pauseChannelsButton, &QPushButton::clicked, this, &WhisperGUI::onPauseAllChannels);
+    connect(resumeChannelsButton, &QPushButton::clicked, this, &WhisperGUI::onResumeAllChannels);
     
     // 视频流输入连接
     if (streamUrlEdit) {
@@ -2724,5 +2793,248 @@ void WhisperGUI::appendOpenAIOutput(const QString& text) {
         QTextCursor cursor = finalOutput->textCursor();
         cursor.movePosition(QTextCursor::End);
         finalOutput->setTextCursor(cursor);
+    }
+}
+
+// 多路识别槽函数实现
+void WhisperGUI::onMultiChannelModeToggled(bool enabled) {
+    multiChannelMode = enabled;
+    
+    // 更新UI状态
+    channelCountSpinBox->setEnabled(enabled);
+    submitTaskButton->setEnabled(enabled);
+    clearTasksButton->setEnabled(enabled);
+    pauseChannelsButton->setEnabled(enabled);
+    resumeChannelsButton->setEnabled(enabled);
+    
+    // 切换输出显示
+    if (enabled) {
+        finalOutput->setVisible(false);
+        multiChannelOutput->setVisible(true);
+        channelStatusLabel->setText("Initializing multi-channel processor...");
+        channelStatusLabel->setStyleSheet("QLabel { color: orange; font-size: 10px; }");
+        
+        // 初始化多路识别处理器
+        multiChannelProcessor = std::make_unique<MultiChannelProcessor>(this);
+        multiChannelGUIManager = std::make_unique<MultiChannelGUIManager>(multiChannelOutput, this);
+        
+        // 连接多路识别处理器的信号
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::taskCompleted,
+                this, &WhisperGUI::onChannelTaskCompleted);
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::taskError,
+                this, &WhisperGUI::onChannelTaskError);
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::channelStatusChanged,
+                this, &WhisperGUI::onChannelStatusChanged);
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::allChannelsBusy,
+                this, &WhisperGUI::onAllChannelsBusy);
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::channelAvailable,
+                this, &WhisperGUI::onChannelAvailable);
+        
+        // 连接GUI管理器的信号
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::taskCompleted,
+                multiChannelGUIManager.get(), &MultiChannelGUIManager::onTaskCompleted);
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::taskError,
+                multiChannelGUIManager.get(), &MultiChannelGUIManager::onTaskError);
+        connect(multiChannelProcessor.get(), &MultiChannelProcessor::channelStatusChanged,
+                multiChannelGUIManager.get(), &MultiChannelGUIManager::onChannelStatusChanged);
+        
+        // 初始化处理器
+        if (multiChannelProcessor->initialize(channelCountSpinBox->value())) {
+            channelStatusLabel->setText(QString("Multi-channel initialized (%1 channels)")
+                                       .arg(channelCountSpinBox->value()));
+            channelStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
+            appendLogMessage("Multi-channel mode enabled successfully");
+        } else {
+            channelStatusLabel->setText("Multi-channel initialization failed");
+            channelStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+            appendLogMessage("Failed to initialize multi-channel mode");
+            
+            // 禁用模式并重置UI
+            enableMultiChannelCheckBox->setChecked(false);
+            return;
+        }
+        
+    } else {
+        finalOutput->setVisible(true);
+        multiChannelOutput->setVisible(false);
+        channelStatusLabel->setText("Multi-channel disabled");
+        channelStatusLabel->setStyleSheet("QLabel { color: gray; font-size: 10px; }");
+        
+        // 清理多路识别处理器
+        if (multiChannelProcessor) {
+            multiChannelProcessor->cleanup();
+            multiChannelProcessor.reset();
+        }
+        multiChannelGUIManager.reset();
+        
+        appendLogMessage("Multi-channel mode disabled");
+    }
+}
+
+void WhisperGUI::onChannelCountChanged(int count) {
+    if (multiChannelMode && multiChannelProcessor && multiChannelProcessor->isInitialized()) {
+        // 重新初始化处理器以使用新的通道数
+        multiChannelProcessor->cleanup();
+        
+        if (multiChannelProcessor->initialize(count)) {
+            channelStatusLabel->setText(QString("Multi-channel updated (%1 channels)").arg(count));
+            channelStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
+            appendLogMessage(QString("Channel count updated to %1").arg(count));
+        } else {
+            channelStatusLabel->setText("Failed to update channel count");
+            channelStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+            appendLogMessage("Failed to update channel count");
+        }
+    }
+}
+
+void WhisperGUI::onSubmitMultiChannelTask() {
+    if (!multiChannelMode || !multiChannelProcessor || !multiChannelProcessor->isInitialized()) {
+        appendLogMessage("Multi-channel mode not initialized");
+        return;
+    }
+    
+    // 创建任务
+    MultiChannelTask task;
+    
+    // 根据当前输入模式设置任务
+    if (audioProcessor) {
+        auto inputMode = audioProcessor->getCurrentInputMode();
+        
+        if (inputMode == AudioProcessor::InputMode::AUDIO_FILE && audioProcessor->hasInputFile()) {
+            task.input_mode = InputMode::AUDIO_FILE;
+            task.audio_file = QString::fromStdString(audioProcessor->getInputFile());
+        } else if (inputMode == AudioProcessor::InputMode::VIDEO_FILE && audioProcessor->hasInputFile()) {
+            task.input_mode = InputMode::VIDEO_FILE;
+            task.audio_file = QString::fromStdString(audioProcessor->getInputFile());
+        } else if (inputMode == AudioProcessor::InputMode::VIDEO_STREAM && audioProcessor->hasStreamUrl()) {
+            task.input_mode = InputMode::VIDEO_STREAM;
+            task.stream_url = QString::fromStdString(audioProcessor->getStreamUrl());
+        } else {
+            appendLogMessage("No valid input source for multi-channel task");
+            return;
+        }
+        
+        // 设置识别参数
+        task.params.language = audioProcessor->getSourceLanguage();
+        task.params.use_gpu = audioProcessor->isUsingGPU();
+        // task.params.beam_size 和 task.params.temperature 可以使用默认值
+    }
+    
+    // 提交任务
+    QString task_id = multiChannelProcessor->submitTask(task);
+    
+    if (task_id.isEmpty()) {
+        appendLogMessage("Failed to submit multi-channel task - all channels busy");
+        channelStatusLabel->setText("All channels busy");
+        channelStatusLabel->setStyleSheet("QLabel { color: orange; font-size: 10px; }");
+    } else {
+        appendLogMessage(QString("Submitted multi-channel task: %1").arg(task_id));
+        
+        // 更新状态显示
+        int availableChannels = multiChannelProcessor->getAvailableChannelCount();
+        int busyChannels = multiChannelProcessor->getBusyChannelCount();
+        channelStatusLabel->setText(QString("Channels: %1 available, %2 busy")
+                                  .arg(availableChannels).arg(busyChannels));
+        channelStatusLabel->setStyleSheet("QLabel { color: blue; font-size: 10px; }");
+    }
+}
+
+void WhisperGUI::onClearAllChannelTasks() {
+    if (multiChannelProcessor) {
+        multiChannelProcessor->clearAllTasks();
+        appendLogMessage("Cleared all multi-channel tasks");
+        
+        int availableChannels = multiChannelProcessor->getAvailableChannelCount();
+        channelStatusLabel->setText(QString("All tasks cleared (%1 channels available)")
+                                  .arg(availableChannels));
+        channelStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
+    }
+}
+
+void WhisperGUI::onPauseAllChannels() {
+    if (multiChannelProcessor) {
+        multiChannelProcessor->pauseAllChannels();
+        appendLogMessage("Paused all channels");
+        channelStatusLabel->setText("All channels paused");
+        channelStatusLabel->setStyleSheet("QLabel { color: orange; font-size: 10px; }");
+    }
+}
+
+void WhisperGUI::onResumeAllChannels() {
+    if (multiChannelProcessor) {
+        multiChannelProcessor->resumeAllChannels();
+        appendLogMessage("Resumed all channels");
+        
+        int availableChannels = multiChannelProcessor->getAvailableChannelCount();
+        int busyChannels = multiChannelProcessor->getBusyChannelCount();
+        channelStatusLabel->setText(QString("Channels resumed: %1 available, %2 busy")
+                                  .arg(availableChannels).arg(busyChannels));
+        channelStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
+    }
+}
+
+void WhisperGUI::onChannelTaskCompleted(const QString& task_id, int channel_id, const MultiChannelResult& result) {
+    // 通过GUI管理器显示结果（颜色已自动处理）
+    appendLogMessage(QString("Channel %1 completed task %2").arg(channel_id + 1).arg(task_id));
+    
+    // 更新通道状态显示
+    if (multiChannelProcessor) {
+        int availableChannels = multiChannelProcessor->getAvailableChannelCount();
+        int busyChannels = multiChannelProcessor->getBusyChannelCount();
+        channelStatusLabel->setText(QString("Channels: %1 available, %2 busy")
+                                  .arg(availableChannels).arg(busyChannels));
+        channelStatusLabel->setStyleSheet("QLabel { color: blue; font-size: 10px; }");
+    }
+}
+
+void WhisperGUI::onChannelTaskError(const QString& task_id, int channel_id, const QString& error) {
+    // 通过GUI管理器显示错误（颜色已自动处理）
+    appendLogMessage(QString("Channel %1 error in task %2: %3")
+                    .arg(channel_id + 1).arg(task_id).arg(error));
+    
+    // 更新通道状态显示
+    if (multiChannelProcessor) {
+        int availableChannels = multiChannelProcessor->getAvailableChannelCount();
+        int busyChannels = multiChannelProcessor->getBusyChannelCount();
+        channelStatusLabel->setText(QString("Channels: %1 available, %2 busy (error in channel %3)")
+                                  .arg(availableChannels).arg(busyChannels).arg(channel_id + 1));
+        channelStatusLabel->setStyleSheet("QLabel { color: red; font-size: 10px; }");
+    }
+}
+
+void WhisperGUI::onChannelStatusChanged(int channel_id, ChannelStatus status) {
+    QString statusText;
+    switch (status) {
+        case ChannelStatus::IDLE:
+            statusText = "IDLE";
+            break;
+        case ChannelStatus::PROCESSING:
+            statusText = "PROCESSING";
+            break;
+        case ChannelStatus::ERROR:
+            statusText = "ERROR";
+            break;
+        case ChannelStatus::PAUSED:
+            statusText = "PAUSED";
+            break;
+    }
+    
+    appendLogMessage(QString("Channel %1 status: %2").arg(channel_id + 1).arg(statusText));
+}
+
+void WhisperGUI::onAllChannelsBusy() {
+    channelStatusLabel->setText("All channels busy - consider adding more channels");
+    channelStatusLabel->setStyleSheet("QLabel { color: orange; font-size: 10px; }");
+    appendLogMessage("All channels are currently busy");
+}
+
+void WhisperGUI::onChannelAvailable(int channel_id) {
+    if (multiChannelProcessor) {
+        int availableChannels = multiChannelProcessor->getAvailableChannelCount();
+        int busyChannels = multiChannelProcessor->getBusyChannelCount();
+        channelStatusLabel->setText(QString("Channel %1 available (%2 total available, %3 busy)")
+                                  .arg(channel_id + 1).arg(availableChannels).arg(busyChannels));
+        channelStatusLabel->setStyleSheet("QLabel { color: green; font-size: 10px; }");
     }
 }

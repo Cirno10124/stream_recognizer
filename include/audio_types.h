@@ -11,6 +11,7 @@ enum class InputMode {
     AUDIO_FILE,
     VIDEO_FILE,
     VIDEO_STREAM    // 视频流输入
+
 };
 
 // 字幕格式枚举

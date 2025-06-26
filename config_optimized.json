@@ -1,0 +1,38 @@
+{
+    "audio": {
+        "channels": 1,
+        "frames_per_buffer": 1024,
+        "keep_ms": 8000,
+        "max_buffers": 1000,
+        "sample_rate": 16000,
+        "segment_overlap_ms": 1000,
+        "segment_size_ms": 3500,
+        "step_ms": 3000,
+        "vad_advanced": {
+            "adaptive_mode": true,
+            "energy_threshold": 0.015,
+            "min_voice_frames": 6,
+            "mode": 3,
+            "silence_duration_ms": 1200,
+            "voice_hold_frames": 10,
+            "background_threshold_multiplier": 3.5,
+            "dynamic_range_threshold": 0.008,
+            "zero_crossing_rate_max": 0.35
+        },
+        "vad_threshold": 0.015
+    },
+    "silero_vad": {
+        "enabled": true,
+        "model_path": "models/silero_vad.onnx",
+        "threshold": 0.6,
+        "window_size_ms": 32,
+        "confidence_threshold": 0.7
+    },
+    "hybrid_vad": {
+        "enabled": true,
+        "webrtc_weight": 0.3,
+        "silero_weight": 0.7,
+        "require_both_agree": true,
+        "energy_gate_enabled": true
+    }
+} 

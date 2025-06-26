@@ -9,3 +9,4 @@
 "C:\Qt\6.8.3\msvc2022_64\bin\moc.exe" "include\voice_activity_detector.h" -o "src\moc_voice_activity_detector.cpp"
 "C:\Qt\6.8.3\msvc2022_64\bin\moc.exe" "include\audio_capture.h" -o "src\moc_audio_capture.cpp" 
 "C:\Qt\6.8.3\msvc2022_64\bin\moc.exe" "include\output_corrector.h" -o "src\moc_output_corrector.cpp" 
+"C:\Qt\6.8.3\msvc2022_64\bin\moc.exe" "include\multi_channel_processor.h" -o "src\moc_multi_channel_processor.cpp" 

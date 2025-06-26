@@ -173,8 +173,7 @@ VoiceActivityDetector::~VoiceActivityDetector() {
         
         // 清理Silero VAD资源（如果存在）
         if (silero_vad_) {
-            // 这里需要实际的SileroVADDetector类实现时再添加删除逻辑
-            // delete silero_vad_;
+            delete silero_vad_;
             silero_vad_ = nullptr;
             std::cout << "[VAD] Silero VAD资源已清理" << std::endl;
         }
@@ -838,9 +837,19 @@ void VoiceActivityDetector::setVADType(VADType type) {
         case VADType::Silero:
             // 如果设置了Silero模型路径，初始化Silero VAD
             if (!silero_model_path_.empty() && !silero_vad_) {
-                // 这里需要实际的SileroVADDetector类实现
-                // silero_vad_ = new SileroVADDetector(silero_model_path_);
-                std::cout << "[VAD] Silero VAD模式已设置，但需要实现SileroVADDetector类" << std::endl;
+                try {
+                    silero_vad_ = new SileroVADDetector(silero_model_path_);
+                    if (silero_vad_ && silero_vad_->initialize()) {
+                        std::cout << "[VAD] Silero VAD初始化成功" << std::endl;
+                    } else {
+                        std::cerr << "[VAD] Silero VAD初始化失败" << std::endl;
+                        delete silero_vad_;
+                        silero_vad_ = nullptr;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[VAD] Silero VAD创建异常: " << e.what() << std::endl;
+                    silero_vad_ = nullptr;
+                }
             }
             break;
         case VADType::Hybrid:
@@ -860,15 +869,27 @@ bool VoiceActivityDetector::setSileroModelPath(const std::string& model_path) {
     if (vad_type_ == VADType::Silero || vad_type_ == VADType::Hybrid) {
         // 清理旧的实例
         if (silero_vad_) {
-            // delete silero_vad_;
+            delete silero_vad_;
             silero_vad_ = nullptr;
         }
         
-        // 这里需要实际的SileroVADDetector类实现
-        // silero_vad_ = new SileroVADDetector(model_path);
-        // return silero_vad_ && silero_vad_->initialize();
-        std::cout << "[VAD] Silero模型路径已设置: " << model_path << std::endl;
-        return true; // 临时返回true，等待实际实现
+        // 创建新的Silero VAD实例
+        try {
+            silero_vad_ = new SileroVADDetector(model_path);
+            if (silero_vad_ && silero_vad_->initialize()) {
+                std::cout << "[VAD] Silero模型路径已设置并初始化成功: " << model_path << std::endl;
+                return true;
+            } else {
+                std::cerr << "[VAD] Silero VAD初始化失败" << std::endl;
+                delete silero_vad_;
+                silero_vad_ = nullptr;
+                return false;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[VAD] Silero VAD创建异常: " << e.what() << std::endl;
+            silero_vad_ = nullptr;
+            return false;
+        }
     }
     
     return true;
@@ -883,10 +904,10 @@ float VoiceActivityDetector::getSileroVADProbability(const std::vector<float>& a
         return 0.0f; // Silero VAD未初始化
     }
     
-    // 这里需要实际的SileroVADDetector类实现
-    // return silero_vad_->detectVoiceActivity(audio_buffer);
-    
-    // 临时实现：返回固定值
-    std::cout << "[VAD] getSileroVADProbability调用，但需要实现SileroVADDetector类" << std::endl;
-    return 0.5f; // 临时返回中等概率
+    try {
+        return silero_vad_->detectVoiceActivity(audio_buffer);
+    } catch (const std::exception& e) {
+        std::cerr << "[VAD] Silero VAD检测异常: " << e.what() << std::endl;
+        return 0.0f;
+    }
 }

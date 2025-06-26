@@ -22,6 +22,12 @@
             "model": "deepseek-coder-7b-instruct-v1.5",
             "temperature": 0.3,
             "max_tokens": 512
+        },
+        "multi_channel": {
+            "enabled": true,
+            "channel_count": 10,
+            "auto_cleanup_temp_files": true,
+            "max_task_queue_size": 100
         }
     },
     "storage": {

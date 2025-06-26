@@ -34,10 +34,13 @@
 #include <memory>
 #include "audio_processor.h"
 #include "subtitle_manager.h"
+#include "multi_channel_processor.h"
 #include <string>
 
 // 前向声明
 class AudioProcessor;
+class MultiChannelProcessor;
+class MultiChannelGUIManager;
 
 class WhisperGUI : public QMainWindow {
     Q_OBJECT
@@ -127,6 +130,19 @@ public slots:
     void onLineCorrectionEnabledChanged(bool enabled);
     void onCorrectionStatusUpdated(const QString& status);
     
+    // 多路识别相关槽函数
+    void onMultiChannelModeToggled(bool enabled);
+    void onChannelCountChanged(int count);
+    void onSubmitMultiChannelTask();
+    void onClearAllChannelTasks();
+    void onPauseAllChannels();
+    void onResumeAllChannels();
+    void onChannelTaskCompleted(const QString& task_id, int channel_id, const MultiChannelResult& result);
+    void onChannelTaskError(const QString& task_id, int channel_id, const QString& error);
+    void onChannelStatusChanged(int channel_id, ChannelStatus status);
+    void onAllChannelsBusy();
+    void onChannelAvailable(int channel_id);
+    
     // 添加获取视频组件的方法到 slots 中
     QVideoWidget* getVideoWidget() { return videoWidget; }
 
@@ -182,6 +198,16 @@ private:
     QCheckBox* enableLineCorrectionCheckBox;
     QLabel* correctionStatusLabel;
     
+    // 多路识别相关UI元素
+    QCheckBox* enableMultiChannelCheckBox;
+    QSpinBox* channelCountSpinBox;
+    QPushButton* submitTaskButton;
+    QPushButton* clearTasksButton;
+    QPushButton* pauseChannelsButton;
+    QPushButton* resumeChannelsButton;
+    QLabel* channelStatusLabel;
+    QTextEdit* multiChannelOutput;
+    
     // 媒体控制
     QMediaPlayer* mediaPlayer;
     QAudioOutput* audioOutput;
@@ -200,6 +226,11 @@ private:
     
     // 字幕管理器
     std::unique_ptr<SubtitleManager> subtitleManager;
+    
+    // 多路识别相关
+    std::unique_ptr<MultiChannelProcessor> multiChannelProcessor;
+    std::unique_ptr<MultiChannelGUIManager> multiChannelGUIManager;
+    bool multiChannelMode;
     
     // 音频处理器
     AudioProcessor* audioProcessor;

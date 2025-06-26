@@ -12,8 +12,8 @@
 // 前向声明WebRTC VAD类型
 struct Fvad;
 
-// 前向声明Silero VAD类型
-class SileroVADDetector;
+// 包含Silero VAD类型
+#include "silero_vad_detector.h"
 
 // VAD类型枚举
 enum class VADType {
